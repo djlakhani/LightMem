@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# The repository-level ignore excludes uv.lock. This evaluation intentionally
+# commits its lockfile after `uv lock` is run on the Linux RunPod.
+!uv.lock
+!.python-version
+

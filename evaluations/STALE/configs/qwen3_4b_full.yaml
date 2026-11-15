@@ -1,0 +1,49 @@
+schema_version: 1
+scenario_path: ../scenarios.json
+scenario_sha256: 16ba5a821dd09c334ea6cd38237948312b346475e7df760806f242bcbd243cc8
+context_view: truncated
+seed: 42
+
+paths:
+  volume_root: /workspace/lightmem-stale
+  run_root: /workspace/lightmem-stale/runs
+  cache_root: /workspace/lightmem-stale/cache
+
+qwen:
+  model: /workspace/lightmem-stale/models/qwen3-4b
+  revision: 1cfa9a7208912126459214e8b04321603b3df60c
+  base_url: http://127.0.0.1:8000/v1
+  api_key: EMPTY
+  thinking: false
+  temperature: 0.0
+  top_p: 1.0
+  seed: 42
+  extraction_max_tokens: 2048
+  answer_max_tokens: 512
+
+lightmem:
+  compression_model: /workspace/lightmem-stale/models/llmlingua-2
+  compression_revision: 5f0c82792b7ea14c6484e015b6a072009496b7f2
+  compression_rate: 0.8
+  embedding_model: /workspace/lightmem-stale/models/all-MiniLM-L6-v2
+  embedding_revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+  embedding_dimensions: 384
+  messages_use: user_only
+  extraction_mode: flat
+  update_queue_top_k: 20
+  update_queue_keep_n: 10
+  update_score_threshold: 0.8
+  retrieval_limit: 20
+
+judge:
+  model: gpt-6-luna
+  concurrency: 1
+  max_retries: 5
+  reasoning_enabled: true
+
+s3:
+  enabled: true
+  bucket: stale-qwen-evals-589498925064-us-east-1-an
+  region: us-east-1
+  prefix: lightmem/stale/qwen3-4b
+
