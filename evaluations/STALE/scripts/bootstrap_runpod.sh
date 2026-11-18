@@ -11,6 +11,11 @@ export HF_HOME="${VOLUME_ROOT}/cache/huggingface"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 
+# Some RunPod images enable the optional hf_transfer backend globally. The
+# evaluation environment intentionally does not depend on that package, so do
+# not let an inherited image setting break Hugging Face downloads.
+unset HF_HUB_ENABLE_HF_TRANSFER
+
 mkdir -p "${UV_CACHE_DIR}" "${HF_HOME}" "${VOLUME_ROOT}/runs"
 mkdir -p "${VOLUME_ROOT}/models"
 
