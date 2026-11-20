@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 stale-lightmem = "stale_lightmem.cli:main"
+stale-evidence-attribution = "stale_lightmem.attribution_cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

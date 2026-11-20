@@ -73,3 +73,53 @@ snapshots and every scored retrieval are retained in the run artifacts.
 
 Run CPU-only tests with `uv run pytest`.
 
+## Retrieved-memory evidence-attribution experiment
+
+This second-stage experiment consumes an existing completed LightMem run. It
+does **not** rebuild memories or rerun retrieval. For every SR, PR, and IPA
+question it gives Qwen3-4B the exact stored top-20 retrieval trace and requires
+a JSON answer plus exactly four ranked memory IDs.
+
+The cited IDs are a self-reported attribution signal, not causal proof of model
+reliance. A causal extension would rerun the same questions after masking or
+removing selected memories and measure how the answers change.
+
+Before generation, `gpt-6-luna` narrows the memory chunks attributed to the
+M_old and M_new source messages, retaining only chunks that actually express
+the corresponding state. UUID intersection is then computed deterministically;
+the judge grades answer correctness and explains the verified old/new evidence
+use. This avoids asking an LLM to perform error-prone UUID matching.
+
+Run a one-scenario smoke test over the existing source run:
+
+```bash
+scripts/run_evidence_attribution.sh \
+  20261118T050518Z-161fcbb3-4fa9f354 \
+  --limit 1 \
+  --no-upload
+```
+
+Run all 50 scenarios and upload the result:
+
+```bash
+scripts/run_evidence_attribution.sh \
+  20261118T050518Z-161fcbb3-4fa9f354
+```
+
+The script starts Qwen automatically when port 8000 is not already healthy.
+It hydrates the source run from the existing S3 prefix when necessary. New
+artifacts are uploaded without deletion under:
+
+```text
+s3://stale-qwen-evals-589498925064-us-east-1-an/lightmem/stale/qwen3-4b/evidence-attribution/<run-id>/
+```
+
+The attribution run contains `evidence_labels.jsonl`, `cited_answers.jsonl`,
+`attribution_judgments.jsonl`, resumable per-stage checkpoints, `summary.json`,
+and a detailed `report.md`. The report shows source-attributed candidate chunks,
+the narrowed M_old/M_new ID sets, all 20 retrieved memories, Qwen's four cited
+IDs, exact prompts, answers, deterministic overlaps, and judge reasoning.
+
+For staged operation, use `uv run stale-evidence-attribution --help` and the
+`label`, `generate`, `judge`, `report`, and `upload` subcommands.
+
