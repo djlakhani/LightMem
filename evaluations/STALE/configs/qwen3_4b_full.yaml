@@ -35,6 +35,15 @@ lightmem:
   update_score_threshold: 0.8
   retrieval_limit: 20
 
+dependency_resolution:
+  enabled: true
+  anchor_count: 4
+  semantic_candidates_per_anchor: 8
+  recent_candidates_per_anchor: 4
+  max_dependencies_per_anchor: 3
+  anchor_max_tokens: 256
+  resolution_max_tokens: 2048
+
 judge:
   model: gpt-6-luna
   concurrency: 1

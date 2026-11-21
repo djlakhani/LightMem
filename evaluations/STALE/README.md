@@ -61,6 +61,27 @@ alongside 384-dimensional vectors. The collection is reset between scenarios.
 The database itself is scratch state and is not uploaded, while pre/post memory
 snapshots and every scored retrieval are retained in the run artifacts.
 
+## Category-aware dependency resolution
+
+The full profile assigns every extracted memory exactly two labels from the
+fixed 20-label taxonomy. The labels must come from different parent groups:
+Living & logistics, Work & finance, Health & personal, and Social & other.
+Labeling is part of the existing extraction request rather than a separate LLM
+call.
+
+For each STALE question, the answer pipeline:
+
+1. Retrieves the normal top 20 memories and asks Qwen to select four anchors.
+2. For each anchor, retrieves later memories sharing a leaf label, retaining the
+   top eight by semantic similarity plus four additional most-recent memories.
+3. Requires Qwen to classify every anchor/candidate pair, select at most three
+   updates, invalidations, or append operations, and summarize the current state.
+4. Gives the four resolved anchor packages to a separate final-answer request.
+
+The anchor-selection prompt intentionally omits category labels. All prompts,
+candidate pools, pairwise verdicts, selected changes, reasons, timing, and token
+usage are retained in `scenario_records.jsonl`.
+
 ## Outputs
 
 - `manifest.json`: versions, model revisions, hashes, hardware, and configuration.

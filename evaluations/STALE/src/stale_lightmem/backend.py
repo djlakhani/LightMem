@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
+from lightmem.memory.taxonomy import label_metadata, validate_category_labels
+
 from .config import EvalConfig
 from .dataset import iter_turns
 from .qwen import assert_no_thinking, wrap_openai_client_no_thinking
@@ -19,6 +21,12 @@ class MemoryBackend(Protocol):
     def retrieve(
         self, query: str, limit: int
     ) -> tuple[list[str], list[dict[str, Any]]]: ...
+    def future_candidates(
+        self,
+        anchor: dict[str, Any],
+        semantic_limit: int,
+        recent_limit: int,
+    ) -> list[dict[str, Any]]: ...
     def statistics(self) -> dict[str, Any]: ...
     def close(self) -> None: ...
 
@@ -103,6 +111,7 @@ class LightMemBackend:
                 "file_level": "DEBUG",
             },
             "extraction_mode": lm.extraction_mode,
+            "taxonomy_labeling": config.dependency_resolution.enabled,
         }
 
         # Prevent an unrelated shell setting from rerouting this local client.
@@ -206,6 +215,83 @@ class LightMemBackend:
                 f"{payload.get('memory', '')}".strip()
             )
         return formatted, traces
+
+    def future_candidates(
+        self,
+        anchor: dict[str, Any],
+        semantic_limit: int,
+        recent_limit: int,
+    ) -> list[dict[str, Any]]:
+        payload = anchor.get("payload", {})
+        anchor_labels = validate_category_labels(payload.get("category_labels"))
+        anchor_timestamp = payload.get("float_time_stamp")
+        if not isinstance(anchor_timestamp, (int, float)):
+            raise ValueError(f"Anchor {anchor.get('id')} has no numeric timestamp")
+
+        filters = {
+            "float_time_stamp": {"gt": float(anchor_timestamp)},
+            "category_labels": anchor_labels,
+        }
+        query_vector = self.memory.text_embedder.embed(payload.get("memory", ""))
+        semantic = self.memory.embedding_retriever.search(
+            query_vector=query_vector,
+            limit=semantic_limit,
+            filters=filters,
+            return_full=True,
+        )
+
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        for result in semantic:
+            item = self._candidate_record(result, anchor_labels, "semantic")
+            selected.append(item)
+            selected_ids.add(item["id"])
+
+        recent_pool: list[dict[str, Any]] = []
+        for point in self.memory.embedding_retriever.get_all(
+            with_vectors=False, with_payload=True
+        ):
+            candidate_payload = point.get("payload", {})
+            candidate_id = str(point.get("id"))
+            candidate_timestamp = candidate_payload.get("float_time_stamp")
+            candidate_labels = candidate_payload.get("category_labels", [])
+            if candidate_id in selected_ids:
+                continue
+            if not isinstance(candidate_timestamp, (int, float)):
+                continue
+            if float(candidate_timestamp) <= float(anchor_timestamp):
+                continue
+            if not set(anchor_labels).intersection(candidate_labels):
+                continue
+            recent_pool.append(
+                self._candidate_record(point, anchor_labels, "recent")
+            )
+        recent_pool.sort(
+            key=lambda item: (
+                -float(item["payload"]["float_time_stamp"]),
+                item["id"],
+            )
+        )
+        selected.extend(recent_pool[:recent_limit])
+        return selected
+
+    @staticmethod
+    def _candidate_record(
+        result: dict[str, Any], anchor_labels: list[str], source: str
+    ) -> dict[str, Any]:
+        payload = copy.deepcopy(result.get("payload", {}))
+        labels = validate_category_labels(payload.get("category_labels"))
+        matching = [label for label in anchor_labels if label in labels]
+        if not matching:
+            raise ValueError("Candidate does not share a label with its anchor")
+        return {
+            "id": str(result.get("id")),
+            "score": result.get("score"),
+            "payload": payload,
+            "category_labels": label_metadata(labels),
+            "matching_labels": label_metadata(matching),
+            "selection_source": source,
+        }
 
     def statistics(self) -> dict[str, Any]:
         return copy.deepcopy(self.memory.get_token_statistics())

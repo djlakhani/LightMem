@@ -50,6 +50,17 @@ class LightMemConfig:
 
 
 @dataclass(frozen=True)
+class DependencyResolutionConfig:
+    enabled: bool = False
+    anchor_count: int = 4
+    semantic_candidates_per_anchor: int = 8
+    recent_candidates_per_anchor: int = 4
+    max_dependencies_per_anchor: int = 3
+    anchor_max_tokens: int = 256
+    resolution_max_tokens: int = 2048
+
+
+@dataclass(frozen=True)
 class JudgeConfig:
     model: str = "gpt-6-luna"
     concurrency: int = 1
@@ -75,6 +86,9 @@ class EvalConfig:
     paths: PathsConfig = field(default_factory=PathsConfig)
     qwen: QwenConfig = field(default_factory=QwenConfig)
     lightmem: LightMemConfig = field(default_factory=LightMemConfig)
+    dependency_resolution: DependencyResolutionConfig = field(
+        default_factory=DependencyResolutionConfig
+    )
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     s3: S3Config = field(default_factory=S3Config)
     source_path: str = field(default="", compare=False)
@@ -123,6 +137,25 @@ def load_config(path: str | Path) -> EvalConfig:
 
     paths = PathsConfig(**raw.pop("paths", {}))
     lightmem = LightMemConfig(**raw.pop("lightmem", {}))
+    dependency_resolution = DependencyResolutionConfig(
+        **raw.pop("dependency_resolution", {})
+    )
+    if dependency_resolution.enabled:
+        if dependency_resolution.anchor_count < 1:
+            raise ValueError("dependency_resolution.anchor_count must be positive")
+        if dependency_resolution.anchor_count > lightmem.retrieval_limit:
+            raise ValueError(
+                "dependency_resolution.anchor_count cannot exceed retrieval_limit"
+            )
+        for name in (
+            "semantic_candidates_per_anchor",
+            "recent_candidates_per_anchor",
+            "max_dependencies_per_anchor",
+            "anchor_max_tokens",
+            "resolution_max_tokens",
+        ):
+            if getattr(dependency_resolution, name) < 1:
+                raise ValueError(f"dependency_resolution.{name} must be positive")
     judge = JudgeConfig(**raw.pop("judge", {}))
     s3 = S3Config(**raw.pop("s3", {}))
     config = EvalConfig(
@@ -130,6 +163,7 @@ def load_config(path: str | Path) -> EvalConfig:
         paths=paths,
         qwen=qwen,
         lightmem=lightmem,
+        dependency_resolution=dependency_resolution,
         judge=judge,
         s3=s3,
         source_path=str(source),

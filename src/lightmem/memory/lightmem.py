@@ -170,6 +170,7 @@ class LightMemory:
             self.senmem_buffer_manager = SenMemBufferManager(max_tokens=self.segmenter.buffer_len, tokenizer=self.segmenter.tokenizer)
         self.logger.info("Initializing memory manager")
         self.manager = MemoryManagerFactory.from_config(self.config.memory_manager)
+        self.manager.taxonomy_labeling = self.config.taxonomy_labeling
         self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 512, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
         if self.config.index_strategy == 'embedding' or self.config.index_strategy == 'hybrid':
             self.logger.info("Initializing text embedder")
@@ -433,6 +434,8 @@ class LightMemory:
                     "speaker_name": mem_obj.speaker_name,
                     "consolidated": mem_obj.consolidated,
                 }
+                if mem_obj.category_labels:
+                    payload["category_labels"] = list(mem_obj.category_labels)
                 if bam_tags:
                     payload["bam_tags"] = bam_tags
                 self.embedding_retriever.insert(
@@ -618,15 +621,21 @@ class LightMemory:
             elif action == "update":
                 new_payload = dict(payload)
                 new_payload["memory"] = updated_entry.get("new_memory")
-                vector = entry.get("vector")
+                if self.config.taxonomy_labeling:
+                    new_payload["category_labels"] = list(updated_entry["labels"])
                 with write_lock:
+                    vector = (
+                        self.text_embedder.embed(new_payload["memory"])
+                        if self.config.taxonomy_labeling
+                        else entry.get("vector")
+                    )
                     self.embedding_retriever.update(vector_id=eid, vector=vector, payload=new_payload)
                 with lock:
                     updated_count += 1
                 self.logger.debug(f"[{call_id}] Updated entry: {eid}")
         self.logger.info(f"[{call_id}] Starting parallel offline update with {max_workers} workers")
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            executor.map(update_entry, all_entries)
+            list(executor.map(update_entry, all_entries))
         with lock:
             self.token_stats["update_calls"] += update_token_stats["calls"]
             self.token_stats["update_prompt_tokens"] += update_token_stats["prompt_tokens"]

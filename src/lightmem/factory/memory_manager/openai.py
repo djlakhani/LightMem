@@ -7,6 +7,13 @@ import httpx
 from lightmem.memory.prompts import EXTRACTION_PROMPTS, METADATA_GENERATE_PROMPT
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.memory.taxonomy import (
+    TaxonomyValidationError,
+    parse_labeled_extraction_response,
+    taxonomy_prompt,
+    update_taxonomy_prompt,
+    validate_category_labels,
+)
 
 model_name_context_windows = {
     "gpt-4o-mini": 128000,
@@ -335,28 +342,67 @@ class OpenaiManager:
                 print(f"User prompt for API call {api_call_idx}:\n" + "\n".join(user_prompt_parts))
                 user_prompt = "\n".join(user_prompt_parts)
                 
+                effective_system_prompt = system_prompt
+                if getattr(self, "taxonomy_labeling", False):
+                    effective_system_prompt += "\n\n" + taxonomy_prompt()
                 metadata_messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": effective_system_prompt},
                     {"role": "user", "content": user_prompt},
                 ]
-                
-                raw_response, usage_info = self.generate_response(
-                    messages=metadata_messages,
-                    response_format={"type": "json_object"},
-                )
-                metadata_facts = clean_response(raw_response)
+                active_messages = list(metadata_messages)
+                usage_info = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+                raw_response = ""
+                metadata_facts = []
+                max_attempts = 2 if getattr(self, "taxonomy_labeling", False) else 1
+                for attempt in range(max_attempts):
+                    raw_response, attempt_usage = self.generate_response(
+                        messages=active_messages,
+                        response_format={"type": "json_object"},
+                    )
+                    for key in usage_info:
+                        usage_info[key] += attempt_usage.get(key, 0)
+                    metadata_facts = clean_response(raw_response)
+                    try:
+                        if getattr(self, "taxonomy_labeling", False):
+                            metadata_facts = parse_labeled_extraction_response(
+                                raw_response
+                            )
+                        break
+                    except TaxonomyValidationError as exc:
+                        if attempt + 1 >= max_attempts:
+                            raise
+                        active_messages.extend(
+                            [
+                                {"role": "assistant", "content": raw_response},
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"The taxonomy labels were invalid: {exc}. "
+                                        "Return the complete corrected JSON object. Preserve "
+                                        "all facts and source_id values, and give every item "
+                                        "exactly two valid labels from different parent groups."
+                                    ),
+                                },
+                            ]
+                        )
                 
                 for entry in metadata_facts:
                     entry["entry_type"] = entry_type
 
                 return {
-                    "input_prompt": metadata_messages,
+                    "input_prompt": active_messages,
                     "output_prompt": raw_response,
                     "cleaned_result": metadata_facts,
                     "usage": usage_info,
                     "entry_type": entry_type
                 }
                 
+            except TaxonomyValidationError:
+                raise
             except Exception as e:
                 print(f"Error processing API call {api_call_idx}: {e}")
                 return {
@@ -370,6 +416,8 @@ class OpenaiManager:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             try:
                 results = list(executor.map(process_segment_wrapper, enumerate(extract_list)))
+            except TaxonomyValidationError:
+                raise
             except Exception as e:
                 print(f"Error in parallel processing: {e}")
                 results = [None] * len(extract_list)
@@ -378,28 +426,79 @@ class OpenaiManager:
 
     def _call_update_llm(self, system_prompt, target_entry, candidate_sources):
         target_memory = target_entry["payload"]["memory"]
-        candidate_memories = [c["payload"]["memory"] for c in candidate_sources]
+        taxonomy_enabled = getattr(self, "taxonomy_labeling", False)
 
         user_prompt = (
-            f"Target memory:{target_memory}\n"
-            f"Candidate memories:\n" + "\n".join([f"- {m}" for m in candidate_memories])
+            f"Target memory: {target_memory}\n"
+            f"Target labels: {target_entry['payload'].get('category_labels', [])}\n"
+            "Candidate memories (newer than the target):\n"
+            + "\n".join(
+                f"- {candidate['payload']['memory']} "
+                f"[labels={candidate['payload'].get('category_labels', [])}]"
+                for candidate in candidate_sources
+            )
         )
 
+        effective_system_prompt = system_prompt
+        if taxonomy_enabled:
+            effective_system_prompt += update_taxonomy_prompt()
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": effective_system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-
-        response_text, usage_info = self.generate_response(
-            messages=messages,
-            response_format={"type": "json_object"}
+        active_messages = list(messages)
+        total_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        max_attempts = 2 if taxonomy_enabled else 1
+        last_error = None
+        for attempt in range(max_attempts):
+            response_text, usage_info = self.generate_response(
+                messages=active_messages,
+                response_format={"type": "json_object"}
+            )
+            for key in total_usage:
+                total_usage[key] += usage_info.get(key, 0)
+            try:
+                result = json.loads(response_text)
+                action = result.get("action", "ignore")
+                if action not in {"update", "delete", "ignore"}:
+                    raise ValueError(f"invalid update action: {action}")
+                result["action"] = action
+                if action == "update":
+                    if not isinstance(result.get("new_memory"), str) or not result[
+                        "new_memory"
+                    ].strip():
+                        raise ValueError("update action requires nonempty new_memory")
+                    if taxonomy_enabled:
+                        result["labels"] = validate_category_labels(
+                            result.get("labels")
+                        )
+                result["usage"] = total_usage
+                return result
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt + 1 >= max_attempts:
+                    if taxonomy_enabled:
+                        raise TaxonomyValidationError(
+                            f"invalid consolidation response: {exc}"
+                        ) from exc
+                    return {"action": "ignore", "usage": total_usage}
+                active_messages.extend(
+                    [
+                        {"role": "assistant", "content": response_text},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"The JSON response was invalid: {exc}. Return a complete "
+                                "corrected JSON object. For update, include nonempty "
+                                "new_memory and exactly two valid cross-group labels."
+                            ),
+                        },
+                    ]
+                )
+        raise TaxonomyValidationError(
+            f"invalid consolidation response: {last_error}"
         )
-        
-        try:
-            result = json.loads(response_text)
-            if "action" not in result:
-                result = {"action": "ignore"}
-            result["usage"] = usage_info  
-            return result
-        except Exception:
-            return {"action": "ignore", "usage": usage_info if 'usage_info' in locals() else None}

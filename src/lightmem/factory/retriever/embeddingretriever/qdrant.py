@@ -118,7 +118,18 @@ class Qdrant:
             if isinstance(value, dict):
                 gte = value.get("gte", None)
                 lte = value.get("lte", None)
-                conditions.append(FieldCondition(key=key, range=Range(gte=gte, lte=lte)))
+                gt = value.get("gt", None)
+                lt = value.get("lt", None)
+                conditions.append(
+                    FieldCondition(
+                        key=key,
+                        range=Range(gte=gte, lte=lte, gt=gt, lt=lt),
+                    )
+                )
+            elif isinstance(value, (list, tuple, set)):
+                conditions.append(
+                    FieldCondition(key=key, match=MatchAny(any=list(value)))
+                )
             else:
                 conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
         return Filter(must=conditions) if conditions else None

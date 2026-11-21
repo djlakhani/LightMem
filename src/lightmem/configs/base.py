@@ -121,4 +121,11 @@ class BaseMemoryConfigs(BaseModel):
                     "- 'flat': Extract factual entries only (independent units)\n"
                     "- 'event': Extract event-level structure (factual + relational, temporally bound)"
     )
+    taxonomy_labeling: bool = Field(
+        default=False,
+        description=(
+            "Assign exactly two fixed category labels from different parent groups "
+            "to every extracted memory."
+        ),
+    )
 

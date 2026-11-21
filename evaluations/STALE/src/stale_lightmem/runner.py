@@ -85,7 +85,7 @@ def make_manifest(
 ) -> dict[str, Any]:
     from .judge import SYSTEM_PROMPT_ALL_IN_ONE_JUDGE
 
-    return {
+    manifest = {
         "schema_version": 1,
         "run_id": run_dir.name,
         "created_at": datetime.now(UTC).isoformat(),
@@ -130,6 +130,24 @@ def make_manifest(
             "packages": _package_versions(),
         },
     }
+    if config.dependency_resolution.enabled:
+        from lightmem.memory.taxonomy import taxonomy_digest
+
+        manifest["dependency_resolution"] = {
+            "enabled": True,
+            "taxonomy_sha256": taxonomy_digest(),
+            "anchor_count": config.dependency_resolution.anchor_count,
+            "semantic_candidates_per_anchor": (
+                config.dependency_resolution.semantic_candidates_per_anchor
+            ),
+            "recent_candidates_per_anchor": (
+                config.dependency_resolution.recent_candidates_per_anchor
+            ),
+            "max_dependencies_per_anchor": (
+                config.dependency_resolution.max_dependencies_per_anchor
+            ),
+        }
+    return manifest
 
 
 def load_run_manifest(run_dir: Path) -> dict[str, Any]:
@@ -240,21 +258,120 @@ def run_generation(
                         query, config.lightmem.retrieval_limit
                     )
                     retrieval_seconds = time.perf_counter() - retrieval_started
-                    messages = answer_messages(query, memories, dim_name)
-                    generation = qwen.generate(
-                        messages,
-                        max_tokens=config.qwen.answer_max_tokens,
-                    )
-                    answers[dim_key] = {
+                    answer_record: dict[str, Any] = {
                         "dimension": dim_name,
                         "query": query,
                         "retrieval": trace,
                         "retrieved_memories": memories,
                         "retrieval_elapsed_seconds": retrieval_seconds,
-                        "prompt": messages,
-                        "answer": generation.content,
-                        "generation": asdict(generation),
                     }
+                    if config.dependency_resolution.enabled:
+                        from .dependency_resolution import (
+                            build_anchor_selection_messages,
+                            build_final_answer_messages,
+                            build_resolution_messages,
+                            generate_validated_json,
+                            parse_anchor_selection,
+                            parse_resolution_response,
+                        )
+
+                        dependency = config.dependency_resolution
+                        allowed_ids = {str(item["id"]) for item in trace}
+                        anchor_messages = build_anchor_selection_messages(
+                            query, trace, dim_name, dependency.anchor_count
+                        )
+                        anchor_started = time.perf_counter()
+                        anchor_generation = generate_validated_json(
+                            qwen,
+                            anchor_messages,
+                            lambda content: parse_anchor_selection(
+                                content, allowed_ids, dependency.anchor_count
+                            ),
+                            max_tokens=dependency.anchor_max_tokens,
+                        )
+                        anchor_seconds = time.perf_counter() - anchor_started
+                        trace_map = {str(item["id"]): item for item in trace}
+                        anchor_ids = anchor_generation["parsed"]["anchor_ids"]
+                        anchors = [trace_map[item] for item in anchor_ids]
+
+                        candidate_started = time.perf_counter()
+                        candidate_groups = {
+                            str(anchor["id"]): backend.future_candidates(
+                                anchor,
+                                dependency.semantic_candidates_per_anchor,
+                                dependency.recent_candidates_per_anchor,
+                            )
+                            for anchor in anchors
+                        }
+                        candidate_seconds = time.perf_counter() - candidate_started
+                        resolution_messages = build_resolution_messages(
+                            query,
+                            anchors,
+                            candidate_groups,
+                            dependency.max_dependencies_per_anchor,
+                        )
+                        resolution_started = time.perf_counter()
+                        resolution_generation = generate_validated_json(
+                            qwen,
+                            resolution_messages,
+                            lambda content: parse_resolution_response(
+                                content,
+                                anchors,
+                                candidate_groups,
+                                dependency.max_dependencies_per_anchor,
+                            ),
+                            max_tokens=dependency.resolution_max_tokens,
+                        )
+                        resolution_seconds = time.perf_counter() - resolution_started
+                        final_messages = build_final_answer_messages(
+                            query,
+                            dim_name,
+                            anchors,
+                            candidate_groups,
+                            resolution_generation["parsed"],
+                        )
+                        generation = qwen.generate(
+                            final_messages,
+                            max_tokens=config.qwen.answer_max_tokens,
+                        )
+                        answer_record.update(
+                            {
+                                "anchor_selection": {
+                                    "prompt": anchor_messages,
+                                    "anchor_ids": anchor_ids,
+                                    "anchors": anchors,
+                                    "attempts": anchor_generation["attempts"],
+                                    "elapsed_seconds": anchor_seconds,
+                                },
+                                "future_candidates_by_anchor": candidate_groups,
+                                "future_candidate_retrieval_elapsed_seconds": (
+                                    candidate_seconds
+                                ),
+                                "dependency_resolution": {
+                                    "prompt": resolution_messages,
+                                    "result": resolution_generation["parsed"],
+                                    "attempts": resolution_generation["attempts"],
+                                    "elapsed_seconds": resolution_seconds,
+                                },
+                                "prompt": final_messages,
+                                "answer": generation.content,
+                                "generation": asdict(generation),
+                            }
+                        )
+                    else:
+                        messages = answer_messages(query, memories, dim_name)
+                        generation = qwen.generate(
+                            messages,
+                            max_tokens=config.qwen.answer_max_tokens,
+                        )
+                        answer_record.update(
+                            {
+                                "prompt": messages,
+                                "answer": generation.content,
+                                "generation": asdict(generation),
+                            }
+                        )
+                    answers[dim_key] = answer_record
                 record = {
                     "status": "complete",
                     "config_hash": config.digest,

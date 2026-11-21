@@ -14,6 +14,13 @@ def _bucket() -> dict[str, int]:
     return {"correct": 0, "total": 0}
 
 
+def _attempt_tokens(answer: dict[str, Any], stage: str) -> int:
+    return sum(
+        attempt.get("generation", {}).get("usage", {}).get("total_tokens", 0)
+        for attempt in answer.get(stage, {}).get("attempts", [])
+    )
+
+
 def build_summary(
     judgments: Iterable[dict[str, Any]],
     scenario_records: Iterable[dict[str, Any]] = (),
@@ -87,6 +94,21 @@ def build_summary(
             for item in records
             for answer in item.get("answers", {}).values()
         ),
+        "future_candidate_retrieval_seconds": sum(
+            answer.get("future_candidate_retrieval_elapsed_seconds", 0.0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
+        "anchor_selection_seconds": sum(
+            answer.get("anchor_selection", {}).get("elapsed_seconds", 0.0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
+        "dependency_resolution_seconds": sum(
+            answer.get("dependency_resolution", {}).get("elapsed_seconds", 0.0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
         "answer_generation_seconds": sum(
             answer.get("generation", {}).get("elapsed_seconds", 0.0)
             for item in records
@@ -99,6 +121,16 @@ def build_summary(
     usage = {
         "answer_qwen_tokens": sum(
             answer.get("generation", {}).get("usage", {}).get("total_tokens", 0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
+        "anchor_selection_qwen_tokens": sum(
+            _attempt_tokens(answer, "anchor_selection")
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
+        "dependency_resolution_qwen_tokens": sum(
+            _attempt_tokens(answer, "dependency_resolution")
             for item in records
             for answer in item.get("answers", {}).values()
         ),
@@ -118,6 +150,22 @@ def build_summary(
             item.get("usage", {}).get("total_tokens", 0) for item in judgment_list
         ),
     }
+    relation_counts: dict[str, int] = defaultdict(int)
+    anchors_with_future_candidates = 0
+    total_anchors = 0
+    total_future_candidates = 0
+    for item in records:
+        for answer in item.get("answers", {}).values():
+            for candidates in answer.get("future_candidates_by_anchor", {}).values():
+                total_anchors += 1
+                total_future_candidates += len(candidates)
+                anchors_with_future_candidates += int(bool(candidates))
+            resolutions = answer.get("dependency_resolution", {}).get(
+                "result", {}
+            ).get("anchor_resolutions", [])
+            for resolution in resolutions:
+                for change in resolution.get("selected_changes", []):
+                    relation_counts[change.get("relation", "unknown")] += 1
     return {
         "status": "complete" if len(judgment_list) == 50 else "partial",
         "judged_scenarios": len(judgment_list),
@@ -126,6 +174,12 @@ def build_summary(
         "memory": memory_totals,
         "timing": timing,
         "usage": usage,
+        "dependency_resolution": {
+            "total_anchors": total_anchors,
+            "anchors_with_future_candidates": anchors_with_future_candidates,
+            "total_future_candidates": total_future_candidates,
+            "selected_relations": dict(sorted(relation_counts.items())),
+        },
     }
 
 
@@ -161,11 +215,22 @@ def render_markdown(summary: dict[str, Any]) -> str:
             f"- Memory construction: {summary['timing']['ingest_seconds']:.2f}s",
             f"- Offline consolidation: {summary['timing']['consolidation_seconds']:.2f}s",
             f"- Retrieval: {summary['timing']['retrieval_seconds']:.2f}s",
+            f"- Future-candidate retrieval: {summary['timing']['future_candidate_retrieval_seconds']:.2f}s",
+            f"- Anchor selection: {summary['timing']['anchor_selection_seconds']:.2f}s",
+            f"- Dependency resolution: {summary['timing']['dependency_resolution_seconds']:.2f}s",
             f"- Answer generation: {summary['timing']['answer_generation_seconds']:.2f}s",
             f"- Judge: {summary['timing']['judge_seconds']:.2f}s",
             f"- Memory-system Qwen tokens: {summary['usage']['memory_qwen_tokens']}",
             f"- Answer Qwen tokens: {summary['usage']['answer_qwen_tokens']}",
+            f"- Anchor-selection Qwen tokens: {summary['usage']['anchor_selection_qwen_tokens']}",
+            f"- Dependency-resolution Qwen tokens: {summary['usage']['dependency_resolution_qwen_tokens']}",
             f"- Judge tokens: {summary['usage']['judge_tokens']}",
+            "",
+            "## Dependency resolution",
+            "",
+            f"- Anchors with future candidates: {summary['dependency_resolution']['anchors_with_future_candidates']}/{summary['dependency_resolution']['total_anchors']}",
+            f"- Future candidates supplied: {summary['dependency_resolution']['total_future_candidates']}",
+            f"- Selected relations: {summary['dependency_resolution']['selected_relations']}",
             "",
         ]
     )

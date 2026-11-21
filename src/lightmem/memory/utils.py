@@ -30,6 +30,7 @@ class MemoryEntry:
     update_queue: List = field(default_factory=list)
     consolidated: bool = False
     bam_tags: List[Any] = field(default_factory=list)
+    category_labels: List[str] = field(default_factory=list)
     
 def clean_response(response: str) -> List[Dict[str, Any]]:
     """
@@ -157,6 +158,8 @@ def save_memory_entries(memory_entries, file_path="memory_entries.json"):
         }
         if getattr(entry, "bam_tags", []):
             data["bam_tags"] = entry.bam_tags
+        if getattr(entry, "category_labels", []):
+            data["category_labels"] = entry.category_labels
         return data
 
     if os.path.exists(file_path):
@@ -348,6 +351,7 @@ def _create_memory_entry_from_fact(
         topic_id=topic_id,
         topic_summary=topic_summary,
         consolidated=False, 
+        category_labels=list(fact_entry.get("labels", [])),
     )
     
     return mem_obj
