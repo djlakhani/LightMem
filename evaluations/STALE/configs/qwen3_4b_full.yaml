@@ -42,7 +42,7 @@ dependency_resolution:
   recent_candidates_per_anchor: 4
   max_dependencies_per_anchor: 3
   anchor_max_tokens: 256
-  resolution_max_tokens: 2048
+  resolution_max_tokens: 1536
 
 judge:
   model: gpt-6-luna

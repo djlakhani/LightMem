@@ -82,7 +82,10 @@ def _labeled_memory(item: dict[str, Any]) -> dict[str, Any]:
         "id": str(item.get("id")),
         "timestamp": payload.get("time_stamp", ""),
         "memory": payload.get("memory", ""),
-        "labels": label_metadata(labels),
+        "labels": [
+            {"id": label["id"], "group": label["group"]}
+            for label in label_metadata(labels)
+        ],
     }
 
 
@@ -98,7 +101,10 @@ def build_resolution_messages(
         candidates = []
         for candidate in candidate_groups.get(anchor_id, []):
             rendered = _labeled_memory(candidate)
-            rendered["matching_labels"] = candidate["matching_labels"]
+            rendered["matching_labels"] = [
+                {"id": label["id"], "group": label["group"]}
+                for label in candidate["matching_labels"]
+            ]
             rendered["selection_source"] = candidate["selection_source"]
             candidates.append(rendered)
         groups.append(
@@ -250,7 +256,10 @@ def build_final_answer_messages(
             rendered = _labeled_memory(candidate)
             rendered.update(
                 {
-                    "matching_labels": candidate["matching_labels"],
+                    "matching_labels": [
+                        {"id": label["id"], "group": label["group"]}
+                        for label in candidate["matching_labels"]
+                    ],
                     "relation": change["relation"],
                     "why": change["why"],
                 }
@@ -321,16 +330,14 @@ def generate_validated_json(
                 raise RuntimeError(
                     f"Structured generation remained invalid: {exc}"
                 ) from exc
-            active_messages.extend(
-                [
-                    {"role": "assistant", "content": generation.content},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Your JSON was invalid: {exc}. Return the complete corrected "
-                            "JSON object only and obey every ID and cardinality constraint."
-                        ),
-                    },
-                ]
-            )
+            active_messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        f"A previous response failed validation: {exc}. Regenerate the "
+                        "complete JSON object from the supplied evidence. Obey every ID "
+                        "and cardinality constraint."
+                    ),
+                }
+            ]
     raise AssertionError("unreachable")

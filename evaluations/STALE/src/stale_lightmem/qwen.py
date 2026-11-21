@@ -10,10 +10,28 @@ from openai import OpenAI
 from .config import QwenConfig
 
 THINK_RE = re.compile(r"<\s*/?\s*think\s*>", re.IGNORECASE)
+CONTEXT_ERROR_RE = re.compile(
+    r"maximum context length is (?P<limit>\d+) tokens.*request has "
+    r"(?P<input>\d+) input tokens",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class ThinkingOutputError(RuntimeError):
     pass
+
+
+def adjusted_max_tokens_for_context_error(
+    error: Exception, requested_max_tokens: int, safety_margin: int = 64
+) -> int | None:
+    match = CONTEXT_ERROR_RE.search(str(error))
+    if not match:
+        return None
+    remaining = int(match.group("limit")) - int(match.group("input"))
+    adjusted = remaining - safety_margin
+    if adjusted < 64 or adjusted >= requested_max_tokens:
+        return None
+    return adjusted
 
 
 def assert_no_thinking(content: str, message: Any = None) -> None:
@@ -64,6 +82,7 @@ class NoThinkingQwenClient:
         response_format: dict[str, str] | None = None,
     ) -> GenerationResult:
         last_error: Exception | None = None
+        active_max_tokens = max_tokens or self.config.answer_max_tokens
         for attempt in range(1, self.max_retries + 1):
             started = time.perf_counter()
             try:
@@ -73,7 +92,7 @@ class NoThinkingQwenClient:
                     "temperature": self.config.temperature,
                     "top_p": self.config.top_p,
                     "seed": self.config.seed,
-                    "max_tokens": max_tokens or self.config.answer_max_tokens,
+                    "max_tokens": active_max_tokens,
                     "extra_body": {
                         "chat_template_kwargs": {"enable_thinking": False},
                     },
@@ -94,6 +113,12 @@ class NoThinkingQwenClient:
                 )
             except Exception as exc:
                 last_error = exc
+                adjusted = adjusted_max_tokens_for_context_error(
+                    exc, active_max_tokens
+                )
+                if adjusted is not None:
+                    active_max_tokens = adjusted
+                    continue
                 if attempt < self.max_retries:
                     time.sleep(2 ** (attempt - 1))
         raise RuntimeError(

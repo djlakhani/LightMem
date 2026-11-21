@@ -57,7 +57,7 @@ class DependencyResolutionConfig:
     recent_candidates_per_anchor: int = 4
     max_dependencies_per_anchor: int = 3
     anchor_max_tokens: int = 256
-    resolution_max_tokens: int = 2048
+    resolution_max_tokens: int = 1536
 
 
 @dataclass(frozen=True)
