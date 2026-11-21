@@ -20,6 +20,10 @@ from lightmem.factory.memory_buffer.sensory_memory import SenMemBufferManager
 from lightmem.factory.memory_buffer.short_term_memory import ShortMemBufferManager
 from lightmem.memory.utils import *
 from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT
+from lightmem.memory.taxonomy import (
+    repair_category_labels,
+    repair_extracted_result_labels,
+)
 from lightmem.configs.logging.utils import get_logger
 
 GLOBAL_TOPIC_IDX = 0
@@ -353,6 +357,12 @@ class LightMemory:
                 extraction_mode=self.config.extraction_mode,
                 custom_prompts=extract_prompts  
             )
+            if self.config.taxonomy_labeling:
+                repair_extracted_result_labels(
+                    extracted_results,
+                    self.text_embedder,
+                    self.logger,
+                )
             # ============ API token Consumption ============
             process_extraction_results(
                 extracted_results=extracted_results,
@@ -436,6 +446,13 @@ class LightMemory:
                 }
                 if mem_obj.category_labels:
                     payload["category_labels"] = list(mem_obj.category_labels)
+                    payload["taxonomy_label_status"] = mem_obj.taxonomy_label_status
+                    if mem_obj.taxonomy_original_labels is not None:
+                        payload["taxonomy_original_labels"] = (
+                            mem_obj.taxonomy_original_labels
+                        )
+                    if mem_obj.taxonomy_label_error:
+                        payload["taxonomy_label_error"] = mem_obj.taxonomy_label_error
                 if bam_tags:
                     payload["bam_tags"] = bam_tags
                 self.embedding_retriever.insert(
@@ -621,9 +638,21 @@ class LightMemory:
             elif action == "update":
                 new_payload = dict(payload)
                 new_payload["memory"] = updated_entry.get("new_memory")
-                if self.config.taxonomy_labeling:
-                    new_payload["category_labels"] = list(updated_entry["labels"])
                 with write_lock:
+                    if self.config.taxonomy_labeling:
+                        labels, status, error = repair_category_labels(
+                            updated_entry.get("labels"),
+                            new_payload["memory"],
+                            self.text_embedder,
+                        )
+                        new_payload["category_labels"] = labels
+                        new_payload["taxonomy_label_status"] = status
+                        if status != "model":
+                            new_payload["taxonomy_original_labels"] = (
+                                updated_entry.get("labels")
+                            )
+                        if error:
+                            new_payload["taxonomy_label_error"] = error
                     vector = (
                         self.text_embedder.embed(new_payload["memory"])
                         if self.config.taxonomy_labeling

@@ -9,6 +9,7 @@ from lightmem.configs.retriever.embeddingretriever.qdrant import QdrantConfig
 from lightmem.factory.retriever.embeddingretriever.qdrant import Qdrant
 from lightmem.memory.taxonomy import (
     TaxonomyValidationError,
+    repair_extracted_result_labels,
     taxonomy_digest,
     validate_category_labels,
 )
@@ -71,6 +72,9 @@ def _candidate(memory_id: str, timestamp: float, text: str):
 
 def test_taxonomy_requires_two_labels_from_different_groups():
     assert validate_category_labels(LABELS) == LABELS
+    assert validate_category_labels(
+        ["Residence Housing", "goalscommitments"]
+    ) == LABELS
     with pytest.raises(TaxonomyValidationError, match="different parent"):
         validate_category_labels(["residence_housing", "travel_trips"])
     with pytest.raises(TaxonomyValidationError, match="exactly two"):
@@ -89,7 +93,7 @@ def test_extraction_repairs_invalid_same_group_labels_once():
                         {
                             "source_id": 0,
                             "fact": "The user moved homes.",
-                            "labels": ["residence_housing", "travel_trips"],
+                            "labels": ["residence_housing", "social_other"],
                         }
                     ]
                 }
@@ -136,8 +140,60 @@ def test_extraction_repairs_invalid_same_group_labels_once():
         topic_id_mapping=[[0]],
     )
     assert len(calls) == 2
+    assert "Parent buckets are not selectable" in calls[1][-1]["content"]
     assert results[0]["cleaned_result"][0]["labels"] == LABELS
     assert results[0]["usage"]["total_tokens"] == 4
+
+
+def test_repeated_bad_model_labels_use_local_semantic_fallback():
+    manager = object.__new__(OpenaiManager)
+    manager.taxonomy_labeling = True
+    invalid = json.dumps(
+        {
+            "data": [
+                {
+                    "source_id": 0,
+                    "fact": "The user moved to a new apartment for work.",
+                    "labels": ["living_logistics", "work_finance"],
+                }
+            ]
+        }
+    )
+    manager.generate_response = lambda messages, response_format: (
+        invalid,
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+    results = manager.meta_text_extract(
+        extract_list=[
+            [
+                [
+                    {
+                        "role": "user",
+                        "content": "I moved to a new apartment for work.",
+                        "sequence_number": 0,
+                        "time_stamp": "2025-01-01T10:00:00.000",
+                        "weekday": "Wed",
+                    }
+                ]
+            ]
+        ],
+        messages_use="user_only",
+        topic_id_mapping=[[0]],
+    )
+    assert results[0]["taxonomy_validation_error"]
+
+    class FakeEmbedder:
+        def embed(self, text):
+            return [float("housing" in text.lower()), float("work" in text.lower()), 1.0]
+
+    repair_extracted_result_labels(results, FakeEmbedder())
+    repaired = results[0]["cleaned_result"][0]
+    assert validate_category_labels(repaired["labels"]) == repaired["labels"]
+    assert repaired["taxonomy_label_status"] == "semantic_fallback"
+    assert repaired["taxonomy_original_labels"] == [
+        "living_logistics",
+        "work_finance",
+    ]
 
 
 def test_anchor_prompt_hides_taxonomy_and_parser_requires_exact_ids():

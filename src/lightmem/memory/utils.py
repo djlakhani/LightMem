@@ -31,6 +31,9 @@ class MemoryEntry:
     consolidated: bool = False
     bam_tags: List[Any] = field(default_factory=list)
     category_labels: List[str] = field(default_factory=list)
+    taxonomy_label_status: str = ""
+    taxonomy_original_labels: Any = None
+    taxonomy_label_error: str = ""
     
 def clean_response(response: str) -> List[Dict[str, Any]]:
     """
@@ -160,6 +163,11 @@ def save_memory_entries(memory_entries, file_path="memory_entries.json"):
             data["bam_tags"] = entry.bam_tags
         if getattr(entry, "category_labels", []):
             data["category_labels"] = entry.category_labels
+            data["taxonomy_label_status"] = entry.taxonomy_label_status
+            if entry.taxonomy_original_labels is not None:
+                data["taxonomy_original_labels"] = entry.taxonomy_original_labels
+            if entry.taxonomy_label_error:
+                data["taxonomy_label_error"] = entry.taxonomy_label_error
         return data
 
     if os.path.exists(file_path):
@@ -352,6 +360,9 @@ def _create_memory_entry_from_fact(
         topic_summary=topic_summary,
         consolidated=False, 
         category_labels=list(fact_entry.get("labels", [])),
+        taxonomy_label_status=fact_entry.get("taxonomy_label_status", ""),
+        taxonomy_original_labels=fact_entry.get("taxonomy_original_labels"),
+        taxonomy_label_error=fact_entry.get("taxonomy_label_error", ""),
     )
     
     return mem_obj

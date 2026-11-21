@@ -357,6 +357,7 @@ class OpenaiManager:
                 }
                 raw_response = ""
                 metadata_facts = []
+                taxonomy_validation_error = None
                 max_attempts = 2 if getattr(self, "taxonomy_labeling", False) else 1
                 for attempt in range(max_attempts):
                     raw_response, attempt_usage = self.generate_response(
@@ -374,7 +375,9 @@ class OpenaiManager:
                         break
                     except TaxonomyValidationError as exc:
                         if attempt + 1 >= max_attempts:
-                            raise
+                            taxonomy_validation_error = str(exc)
+                            metadata_facts = clean_response(raw_response)
+                            break
                         active_messages.extend(
                             [
                                 {"role": "assistant", "content": raw_response},
@@ -384,7 +387,8 @@ class OpenaiManager:
                                         f"The taxonomy labels were invalid: {exc}. "
                                         "Return the complete corrected JSON object. Preserve "
                                         "all facts and source_id values, and give every item "
-                                        "exactly two valid labels from different parent groups."
+                                        "exactly two valid LEAF label IDs from different parent "
+                                        "buckets. Parent bucket IDs themselves are forbidden."
                                     ),
                                 },
                             ]
@@ -398,7 +402,8 @@ class OpenaiManager:
                     "output_prompt": raw_response,
                     "cleaned_result": metadata_facts,
                     "usage": usage_info,
-                    "entry_type": entry_type
+                    "entry_type": entry_type,
+                    "taxonomy_validation_error": taxonomy_validation_error,
                 }
                 
             except TaxonomyValidationError:
@@ -482,9 +487,19 @@ class OpenaiManager:
                 last_error = exc
                 if attempt + 1 >= max_attempts:
                     if taxonomy_enabled:
-                        raise TaxonomyValidationError(
-                            f"invalid consolidation response: {exc}"
-                        ) from exc
+                        try:
+                            fallback = json.loads(response_text)
+                        except json.JSONDecodeError:
+                            fallback = {"action": "ignore"}
+                        if (
+                            fallback.get("action") != "update"
+                            or not isinstance(fallback.get("new_memory"), str)
+                            or not fallback["new_memory"].strip()
+                        ):
+                            fallback = {"action": "ignore"}
+                        fallback["taxonomy_validation_error"] = str(exc)
+                        fallback["usage"] = total_usage
+                        return fallback
                     return {"action": "ignore", "usage": total_usage}
                 active_messages.extend(
                     [
@@ -499,6 +514,8 @@ class OpenaiManager:
                         },
                     ]
                 )
-        raise TaxonomyValidationError(
-            f"invalid consolidation response: {last_error}"
-        )
+        return {
+            "action": "ignore",
+            "taxonomy_validation_error": str(last_error),
+            "usage": total_usage,
+        }

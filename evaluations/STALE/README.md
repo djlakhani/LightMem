@@ -69,6 +69,12 @@ Living & logistics, Work & finance, Health & personal, and Social & other.
 Labeling is part of the existing extraction request rather than a separate LLM
 call.
 
+Label formatting variants are canonicalized locally. If the model still
+returns invalid labels after one repair request, the existing embedding model
+selects a valid cross-group pair instead of aborting the scenario. The payload
+records `taxonomy_label_status`, the original labels, and the validation error
+so fallback assignments remain auditable.
+
 For each STALE question, the answer pipeline:
 
 1. Retrieves the normal top 20 memories and asks Qwen to select four anchors.
