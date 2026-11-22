@@ -88,3 +88,20 @@ def test_qwen_retries_context_error_with_smaller_completion_budget():
     )
     assert result.attempts == 2
     assert observed == [2048, 1567]
+
+
+def test_preflight_rejects_server_that_is_still_using_8k_context():
+    qwen = object.__new__(NoThinkingQwenClient)
+    qwen.config = SimpleNamespace(
+        model="qwen",
+        minimum_context_tokens=16384,
+    )
+    qwen.client = SimpleNamespace(
+        models=SimpleNamespace(
+            list=lambda: SimpleNamespace(
+                data=[SimpleNamespace(id="qwen", max_model_len=8192)]
+            )
+        )
+    )
+    with pytest.raises(RuntimeError, match="Restart scripts/start_qwen.sh"):
+        qwen.preflight()

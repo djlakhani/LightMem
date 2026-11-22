@@ -93,18 +93,14 @@ class FakeQwen:
             payload = json.loads(messages[1]["content"])
             content = json.dumps(
                 {
-                    "anchor_resolutions": [
-                        {
-                            "anchor_id": group["anchor"]["id"],
-                            "candidate_verdicts": [
-                                {
-                                    "memory_id": candidate["id"],
-                                    "relation": "updates",
-                                }
+                    "anchor_resolutions": {
+                        group["anchor"]["id"]: {
+                            "candidate_verdicts": {
+                                candidate["id"]: "updates"
                                 for candidate in group[
                                     "future_states_within_matching_categories"
                                 ]
-                            ],
+                            },
                             "selected_changes": [
                                 {
                                     "memory_id": group[
@@ -119,7 +115,7 @@ class FakeQwen:
                             ),
                         }
                         for group in payload["anchor_groups"]
-                    ]
+                    }
                 }
             )
         else:

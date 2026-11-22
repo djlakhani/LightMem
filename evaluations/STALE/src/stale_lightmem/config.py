@@ -27,6 +27,7 @@ class QwenConfig:
     temperature: float = 0.0
     top_p: float = 1.0
     seed: int = 42
+    minimum_context_tokens: int = 16384
     extraction_max_tokens: int = 2048
     answer_max_tokens: int = 512
 
@@ -57,7 +58,7 @@ class DependencyResolutionConfig:
     recent_candidates_per_anchor: int = 4
     max_dependencies_per_anchor: int = 3
     anchor_max_tokens: int = 256
-    resolution_max_tokens: int = 1536
+    resolution_max_tokens: int = 2048
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,8 @@ def load_config(path: str | Path) -> EvalConfig:
     qwen = QwenConfig(**raw.pop("qwen", {}))
     if qwen.thinking:
         raise ValueError("Qwen thinking must remain disabled for this benchmark")
+    if qwen.minimum_context_tokens < 1:
+        raise ValueError("qwen.minimum_context_tokens must be positive")
 
     paths = PathsConfig(**raw.pop("paths", {}))
     lightmem = LightMemConfig(**raw.pop("lightmem", {}))

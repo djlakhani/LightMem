@@ -60,6 +60,7 @@ class GenerationResult:
     usage: dict[str, int]
     attempts: int
     no_thinking_verified: bool = True
+    finish_reason: str | None = None
 
 
 class NoThinkingQwenClient:
@@ -110,6 +111,7 @@ class NoThinkingQwenClient:
                     elapsed_seconds=time.perf_counter() - started,
                     usage=normalize_usage(response),
                     attempts=attempt,
+                    finish_reason=getattr(response.choices[0], "finish_reason", None),
                 )
             except Exception as exc:
                 last_error = exc
@@ -125,7 +127,28 @@ class NoThinkingQwenClient:
             f"Qwen generation failed after {self.max_retries} attempts"
         ) from last_error
 
-    def preflight(self) -> None:
+    def preflight(self) -> dict[str, int]:
+        models = self.client.models.list()
+        if not models.data:
+            raise RuntimeError("Qwen server did not report an available model")
+        model_card = next(
+            (
+                model
+                for model in models.data
+                if getattr(model, "id", None) == self.config.model
+            ),
+            models.data[0],
+        )
+        max_model_len = getattr(model_card, "max_model_len", None)
+        if not isinstance(max_model_len, int):
+            raise RuntimeError("Qwen server did not report its max_model_len")
+        if max_model_len < self.config.minimum_context_tokens:
+            raise RuntimeError(
+                "Qwen server context is "
+                f"{max_model_len} tokens; at least "
+                f"{self.config.minimum_context_tokens} are required. Restart "
+                "scripts/start_qwen.sh so the new --max-model-len takes effect."
+            )
         plain = self.generate(
             [{"role": "user", "content": "Reply with exactly: ready"}],
             max_tokens=16,
@@ -141,6 +164,7 @@ class NoThinkingQwenClient:
 
         if json.loads(structured.content).get("ready") is not True:
             raise RuntimeError("Qwen structured-output preflight failed")
+        return {"max_model_len": max_model_len}
 
 
 class _NoThinkingCompletionsProxy:

@@ -192,7 +192,14 @@ def preflight(
             )
 
     qwen = NoThinkingQwenClient(config.qwen)
-    qwen.preflight()
+    qwen_server = qwen.preflight()
+    dependency_smoke: dict[str, Any] | None = None
+    if config.dependency_resolution.enabled:
+        from .dependency_resolution import smoke_dependency_resolution
+
+        dependency_smoke = smoke_dependency_resolution(
+            qwen, config.dependency_resolution
+        )
     if check_s3 and config.s3.enabled:
         S3ArtifactStore(config.s3, "preflight-read-only").preflight()
     return {
@@ -200,6 +207,8 @@ def preflight(
         "scenario_sha256": dataset.sha256,
         "gpu": gpu,
         "qwen_no_thinking": True,
+        "qwen_server": qwen_server,
+        "dependency_resolution": dependency_smoke,
         "s3_checked": bool(check_s3 and config.s3.enabled),
     }
 
@@ -269,10 +278,10 @@ def run_generation(
                         from .dependency_resolution import (
                             build_anchor_selection_messages,
                             build_final_answer_messages,
-                            build_resolution_messages,
+                            anchor_selection_response_format,
+                            generate_dependency_resolution,
                             generate_validated_json,
                             parse_anchor_selection,
-                            parse_resolution_response,
                         )
 
                         dependency = config.dependency_resolution
@@ -288,6 +297,9 @@ def run_generation(
                                 content, allowed_ids, dependency.anchor_count
                             ),
                             max_tokens=dependency.anchor_max_tokens,
+                            response_format=anchor_selection_response_format(
+                                dependency.anchor_count, allowed_ids
+                            ),
                         )
                         anchor_seconds = time.perf_counter() - anchor_started
                         trace_map = {str(item["id"]): item for item in trace}
@@ -304,22 +316,13 @@ def run_generation(
                             for anchor in anchors
                         }
                         candidate_seconds = time.perf_counter() - candidate_started
-                        resolution_messages = build_resolution_messages(
+                        resolution_started = time.perf_counter()
+                        resolution_generation = generate_dependency_resolution(
+                            qwen,
                             query,
                             anchors,
                             candidate_groups,
                             dependency.max_dependencies_per_anchor,
-                        )
-                        resolution_started = time.perf_counter()
-                        resolution_generation = generate_validated_json(
-                            qwen,
-                            resolution_messages,
-                            lambda content: parse_resolution_response(
-                                content,
-                                anchors,
-                                candidate_groups,
-                                dependency.max_dependencies_per_anchor,
-                            ),
                             max_tokens=dependency.resolution_max_tokens,
                         )
                         resolution_seconds = time.perf_counter() - resolution_started
@@ -348,9 +351,16 @@ def run_generation(
                                     candidate_seconds
                                 ),
                                 "dependency_resolution": {
-                                    "prompt": resolution_messages,
+                                    "prompt": resolution_generation["prompt"],
+                                    "mode": resolution_generation["mode"],
+                                    "fallback_prompts": resolution_generation[
+                                        "fallback_prompts"
+                                    ],
                                     "result": resolution_generation["parsed"],
                                     "attempts": resolution_generation["attempts"],
+                                    "batch_error": resolution_generation.get(
+                                        "batch_error"
+                                    ),
                                     "elapsed_seconds": resolution_seconds,
                                 },
                                 "prompt": final_messages,

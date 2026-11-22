@@ -16,13 +16,18 @@ from lightmem.memory.taxonomy import (
 from lightmem.memory.lightmem import LightMemory
 from lightmem.factory.memory_manager.openai import OpenaiManager
 from stale_lightmem.dependency_resolution import (
+    anchor_selection_response_format,
     build_anchor_selection_messages,
     build_final_answer_messages,
     build_resolution_messages,
+    generate_dependency_resolution,
+    generate_validated_json,
     parse_anchor_selection,
     parse_resolution_response,
+    resolution_response_format,
 )
 from stale_lightmem.backend import LightMemBackend
+from stale_lightmem.qwen import GenerationResult
 
 
 LABELS = ["residence_housing", "goals_commitments"]
@@ -214,6 +219,14 @@ def test_anchor_prompt_hides_taxonomy_and_parser_requires_exact_ids():
             {f"id-{index}" for index in range(1, 6)},
             4,
         )
+    schema = anchor_selection_response_format(
+        4, {f"id-{index}" for index in range(1, 6)}
+    )
+    anchor_items = schema["json_schema"]["schema"]["properties"]["anchor_ids"]
+    assert anchor_items["uniqueItems"] is True
+    assert set(anchor_items["items"]["enum"]) == {
+        f"id-{index}" for index in range(1, 6)
+    }
 
 
 def test_resolution_requires_full_candidate_audit_and_distills_summary():
@@ -258,11 +271,132 @@ def test_resolution_requires_full_candidate_audit_and_distills_summary():
     assert package["category_resolution"].startswith("The current stay")
     assert package["selected_later_states"][0]["relation"] == "invalidates"
 
+    schema = resolution_response_format(anchors, candidates, 3)
+    resolution_schema = schema["json_schema"]["schema"]["properties"][
+        "anchor_resolutions"
+    ]
+    assert resolution_schema["required"] == ["anchor"]
+    verdict_schema = resolution_schema["properties"]["anchor"]["properties"][
+        "candidate_verdicts"
+    ]
+    assert verdict_schema["required"] == ["new", "other"]
+    assert verdict_schema["additionalProperties"] is False
+
     incomplete = response.replace(
         ', {"memory_id": "other", "relation": "none"}', ""
     )
     with pytest.raises(ValueError, match="skipped candidates"):
         parse_resolution_response(incomplete, anchors, candidates, 3)
+
+
+def test_truncated_structured_output_is_retried_even_if_json_is_parseable():
+    class TruncatingQwen:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, messages, max_tokens, response_format=None):
+            self.calls += 1
+            return GenerationResult(
+                content='{"ok": true}',
+                elapsed_seconds=0.1,
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                attempts=1,
+                finish_reason="length" if self.calls == 1 else "stop",
+            )
+
+    qwen = TruncatingQwen()
+    generated = generate_validated_json(
+        qwen,
+        [{"role": "user", "content": "return JSON"}],
+        lambda content: json.loads(content),
+        max_tokens=32,
+    )
+    assert qwen.calls == 2
+    assert [attempt["status"] for attempt in generated["attempts"]] == [
+        "invalid",
+        "valid",
+    ]
+    assert "truncated" in generated["attempts"][0]["error"]
+
+
+def test_malformed_batched_resolution_falls_back_to_each_anchor():
+    anchors = [
+        _memory("anchor-1", 1, "The user plans to stay five months."),
+        _memory("anchor-2", 1, "The user works remotely."),
+    ]
+    candidates = {
+        "anchor-1": [_candidate("future-1", 2, "The stay is now eighteen months.")],
+        "anchor-2": [_candidate("future-2", 2, "The user now works on site.")],
+    }
+
+    class MalformedBatchQwen:
+        def __init__(self):
+            self.calls = 0
+            self.response_formats = []
+
+        def generate(self, messages, max_tokens, response_format=None):
+            self.calls += 1
+            self.response_formats.append(response_format)
+            if self.calls <= 2:
+                content = '{"anchor_resolutions": {'
+            else:
+                group = json.loads(messages[1]["content"])["anchor_groups"][0]
+                anchor_id = group["anchor"]["id"]
+                candidate_id = group[
+                    "future_states_within_matching_categories"
+                ][0]["id"]
+                content = json.dumps(
+                    {
+                        "anchor_resolutions": {
+                            anchor_id: {
+                                "candidate_verdicts": {
+                                    candidate_id: "updates"
+                                },
+                                "selected_changes": [
+                                    {
+                                        "memory_id": candidate_id,
+                                        "relation": "updates",
+                                        "why": (
+                                            "The later state directly changes the "
+                                            "corresponding earlier state."
+                                        ),
+                                    }
+                                ],
+                                "resolution_summary": (
+                                    "The later state is now current and replaces the "
+                                    "corresponding anchor detail."
+                                ),
+                            }
+                        }
+                    }
+                )
+            return GenerationResult(
+                content=content,
+                elapsed_seconds=0.1,
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                attempts=1,
+                finish_reason="stop",
+            )
+
+    qwen = MalformedBatchQwen()
+    generated = generate_dependency_resolution(
+        qwen,
+        "What is current?",
+        anchors,
+        candidates,
+        3,
+        max_tokens=2048,
+    )
+    assert generated["mode"] == "per_anchor_fallback"
+    assert qwen.calls == 4
+    assert [
+        resolution["anchor_id"]
+        for resolution in generated["parsed"]["anchor_resolutions"]
+    ] == ["anchor-1", "anchor-2"]
+    assert all(
+        response_format["type"] == "json_schema"
+        for response_format in qwen.response_formats
+    )
 
 
 def test_all_none_summary_reaches_final_answerer():

@@ -11,6 +11,12 @@ from lightmem.memory.taxonomy import label_metadata, validate_category_labels
 RELATIONS = frozenset({"none", "updates", "invalidates", "appends"})
 
 
+class StructuredGenerationError(RuntimeError):
+    def __init__(self, message: str, attempts: list[dict[str, Any]]):
+        super().__init__(message)
+        self.attempts = attempts
+
+
 def parse_json_object(content: str) -> dict[str, Any]:
     match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
     text = match.group(1) if match else content
@@ -54,6 +60,35 @@ def build_anchor_selection_messages(
             ),
         },
     ]
+
+
+def anchor_selection_response_format(
+    anchor_count: int, allowed_ids: set[str]
+) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "anchor_selection",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "anchor_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": sorted(allowed_ids),
+                        },
+                        "minItems": anchor_count,
+                        "maxItems": anchor_count,
+                        "uniqueItems": True,
+                    }
+                },
+                "required": ["anchor_ids"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def parse_anchor_selection(
@@ -123,9 +158,8 @@ For every candidate, assign exactly one relation:
 - `appends`: adds material context that should be combined with the anchor.
 - `none`: does not materially alter or extend the anchor.
 
-Return only JSON with `anchor_resolutions`. For each anchor return:
-- `anchor_id`
-- `candidate_verdicts`: every supplied candidate exactly once, each with `memory_id` and `relation`
+Return only JSON with `anchor_resolutions`, an object keyed by every supplied anchor ID exactly once. For each anchor value return:
+- `candidate_verdicts`: one JSON object mapping every supplied candidate ID to its relation
 - `selected_changes`: at most {max_dependencies} strongest non-none candidates, each with `memory_id`, `relation`, and a specific `why`
 - `resolution_summary`: a substantive statement of the resulting current state. If all candidates are `none`, explain why the later same-category states do not change the anchor.
 
@@ -141,6 +175,83 @@ Do not use `none` merely because comparison is difficult. Do not invent facts or
     ]
 
 
+def resolution_response_format(
+    anchors: list[dict[str, Any]],
+    candidate_groups: dict[str, list[dict[str, Any]]],
+    max_dependencies: int,
+) -> dict[str, Any]:
+    relation = {"type": "string", "enum": sorted(RELATIONS)}
+    anchor_schemas: dict[str, Any] = {}
+    for anchor in anchors:
+        anchor_id = str(anchor["id"])
+        candidate_ids = [
+            str(candidate["id"])
+            for candidate in candidate_groups.get(anchor_id, [])
+        ]
+        memory_id_schema: dict[str, Any] = {"type": "string"}
+        if candidate_ids:
+            memory_id_schema["enum"] = candidate_ids
+        anchor_schemas[anchor_id] = {
+            "type": "object",
+            "properties": {
+                "candidate_verdicts": {
+                    "type": "object",
+                    "properties": {
+                        candidate_id: relation for candidate_id in candidate_ids
+                    },
+                    "required": candidate_ids,
+                    "additionalProperties": False,
+                },
+                "selected_changes": {
+                    "type": "array",
+                    "maxItems": max_dependencies if candidate_ids else 0,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {
+                                **memory_id_schema,
+                            },
+                            "relation": relation,
+                            "why": {"type": "string", "minLength": 20},
+                        },
+                        "required": ["memory_id", "relation", "why"],
+                        "additionalProperties": False,
+                    },
+                },
+                "resolution_summary": {
+                    "type": "string",
+                    "minLength": 30,
+                },
+            },
+            "required": [
+                "candidate_verdicts",
+                "selected_changes",
+                "resolution_summary",
+            ],
+            "additionalProperties": False,
+        }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "dependency_resolution",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "anchor_resolutions": {
+                        "type": "object",
+                        "properties": anchor_schemas,
+                        "required": list(anchor_schemas),
+                        "additionalProperties": False,
+                    }
+                },
+                "required": ["anchor_resolutions"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def parse_resolution_response(
     content: str,
     anchors: list[dict[str, Any]],
@@ -149,11 +260,20 @@ def parse_resolution_response(
 ) -> dict[str, Any]:
     value = parse_json_object(content)
     resolutions = value.get("anchor_resolutions")
-    if not isinstance(resolutions, list):
-        raise ValueError("anchor_resolutions must be an array")
     expected_anchor_ids = [str(anchor["id"]) for anchor in anchors]
+    if isinstance(resolutions, dict):
+        resolution_items = []
+        for anchor_id, resolution in resolutions.items():
+            if not isinstance(resolution, dict):
+                raise ValueError("each anchor resolution must be an object")
+            resolution_items.append({**resolution, "anchor_id": anchor_id})
+    elif isinstance(resolutions, list):
+        # Retain compatibility with the original list representation.
+        resolution_items = resolutions
+    else:
+        raise ValueError("anchor_resolutions must be an object")
     by_anchor: dict[str, dict[str, Any]] = {}
-    for resolution in resolutions:
+    for resolution in resolution_items:
         if not isinstance(resolution, dict):
             raise ValueError("each anchor resolution must be an object")
         anchor_id = resolution.get("anchor_id")
@@ -165,14 +285,24 @@ def parse_resolution_response(
             str(item["id"]) for item in candidate_groups.get(anchor_id, [])
         }
         verdicts = resolution.get("candidate_verdicts")
-        if not isinstance(verdicts, list):
-            raise ValueError(f"candidate_verdicts must be an array for {anchor_id}")
         verdict_map: dict[str, str] = {}
-        for verdict in verdicts:
-            if not isinstance(verdict, dict):
-                raise ValueError("candidate verdicts must be objects")
-            memory_id = verdict.get("memory_id")
-            relation = verdict.get("relation")
+        if isinstance(verdicts, dict):
+            verdict_items = verdicts.items()
+        elif isinstance(verdicts, list):
+            # Retain compatibility with checkpoints produced before the compact
+            # map representation was introduced.
+            verdict_items = []
+            for verdict in verdicts:
+                if not isinstance(verdict, dict):
+                    raise ValueError("candidate verdicts must be objects")
+                verdict_items.append(
+                    (verdict.get("memory_id"), verdict.get("relation"))
+                )
+        else:
+            raise ValueError(
+                f"candidate_verdicts must be an object for {anchor_id}"
+            )
+        for memory_id, relation in verdict_items:
             if memory_id in verdict_map:
                 raise ValueError(f"duplicate candidate verdict: {memory_id}")
             if memory_id not in expected_candidates:
@@ -304,17 +434,23 @@ def generate_validated_json(
     parser: Callable[[str], dict[str, Any]],
     *,
     max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+    validation_attempts: int = 2,
 ) -> dict[str, Any]:
     active_messages = list(messages)
     attempts: list[dict[str, Any]] = []
-    for attempt in range(2):
+    for attempt in range(validation_attempts):
         generation = qwen.generate(
             active_messages,
             max_tokens=max_tokens,
-            response_format={"type": "json_object"},
+            response_format=response_format or {"type": "json_object"},
         )
         generation_data = asdict(generation)
         try:
+            if generation.finish_reason == "length":
+                raise ValueError(
+                    f"structured response was truncated at {max_tokens} tokens"
+                )
             parsed = parser(generation.content)
             attempts.append({"status": "valid", "generation": generation_data})
             return {"parsed": parsed, "attempts": attempts}
@@ -326,9 +462,9 @@ def generate_validated_json(
                     "generation": generation_data,
                 }
             )
-            if attempt == 1:
-                raise RuntimeError(
-                    f"Structured generation remained invalid: {exc}"
+            if attempt == validation_attempts - 1:
+                raise StructuredGenerationError(
+                    f"Structured generation remained invalid: {exc}", attempts
                 ) from exc
             active_messages = list(messages) + [
                 {
@@ -341,3 +477,160 @@ def generate_validated_json(
                 }
             ]
     raise AssertionError("unreachable")
+
+
+def generate_dependency_resolution(
+    qwen: Any,
+    query: str,
+    anchors: list[dict[str, Any]],
+    candidate_groups: dict[str, list[dict[str, Any]]],
+    max_dependencies: int,
+    *,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Resolve all anchors in one request, falling back by anchor on failure."""
+    messages = build_resolution_messages(
+        query, anchors, candidate_groups, max_dependencies
+    )
+    parser = lambda content: parse_resolution_response(
+        content, anchors, candidate_groups, max_dependencies
+    )
+    try:
+        generated = generate_validated_json(
+            qwen,
+            messages,
+            parser,
+            max_tokens=max_tokens,
+            response_format=resolution_response_format(
+                anchors, candidate_groups, max_dependencies
+            ),
+        )
+        return {
+            **generated,
+            "mode": "batched",
+            "prompt": messages,
+            "fallback_prompts": [],
+        }
+    except RuntimeError as batch_error:
+        if isinstance(batch_error, StructuredGenerationError):
+            attempts = [
+                {"scope": "batched", **attempt}
+                for attempt in batch_error.attempts
+            ]
+        else:
+            attempts = [
+                {
+                    "scope": "batched",
+                    "status": "generation_error",
+                    "error": str(batch_error),
+                }
+            ]
+        resolved: list[dict[str, Any]] = []
+        fallback_prompts: list[list[dict[str, str]]] = []
+        for anchor in anchors:
+            anchor_id = str(anchor["id"])
+            single_anchors = [anchor]
+            single_groups = {anchor_id: candidate_groups.get(anchor_id, [])}
+            single_messages = build_resolution_messages(
+                query, single_anchors, single_groups, max_dependencies
+            )
+            fallback_prompts.append(single_messages)
+            generated = generate_validated_json(
+                qwen,
+                single_messages,
+                lambda content, current_anchors=single_anchors, current_groups=single_groups: parse_resolution_response(
+                    content,
+                    current_anchors,
+                    current_groups,
+                    max_dependencies,
+                ),
+                max_tokens=max_tokens,
+                response_format=resolution_response_format(
+                    single_anchors, single_groups, max_dependencies
+                ),
+                validation_attempts=3,
+            )
+            attempts.extend(
+                {"scope": anchor_id, **attempt}
+                for attempt in generated["attempts"]
+            )
+            resolved.extend(generated["parsed"]["anchor_resolutions"])
+        return {
+            "parsed": {"anchor_resolutions": resolved},
+            "attempts": attempts,
+            "mode": "per_anchor_fallback",
+            "prompt": messages,
+            "fallback_prompts": fallback_prompts,
+            "batch_error": str(batch_error),
+        }
+
+
+def smoke_dependency_resolution(qwen: Any, config: Any) -> dict[str, Any]:
+    """Exercise the production resolver shape before a benchmark run starts."""
+    labels = ["residence_housing", "goals_commitments"]
+    anchors: list[dict[str, Any]] = []
+    candidate_groups: dict[str, list[dict[str, Any]]] = {}
+    candidate_count = (
+        config.semantic_candidates_per_anchor + config.recent_candidates_per_anchor
+    )
+    for anchor_index in range(config.anchor_count):
+        anchor_id = f"smoke-anchor-{anchor_index}"
+        anchor = {
+            "id": anchor_id,
+            "payload": {
+                "memory": (
+                    "The user currently lives near work and intends to keep this "
+                    f"arrangement for the next year (anchor {anchor_index})."
+                ),
+                "time_stamp": "2025-01-01T10:00:00.000",
+                "float_time_stamp": 1.0,
+                "category_labels": labels,
+            },
+        }
+        anchors.append(anchor)
+        candidates: list[dict[str, Any]] = []
+        for candidate_index in range(candidate_count):
+            candidate = {
+                "id": f"smoke-future-{anchor_index}-{candidate_index}",
+                "payload": {
+                    "memory": (
+                        "At a later date, the user described a possible housing, "
+                        "work, scheduling, or personal change. Decide from this "
+                        "statement alone whether it materially affects the earlier "
+                        f"state. Synthetic smoke item {candidate_index} for anchor "
+                        f"{anchor_index}."
+                    ),
+                    "time_stamp": "2025-02-01T10:00:00.000",
+                    "float_time_stamp": float(candidate_index + 2),
+                    "category_labels": labels,
+                },
+                "matching_labels": [
+                    {
+                        "id": "residence_housing",
+                        "group": "living_logistics",
+                    }
+                ],
+                "selection_source": (
+                    "semantic"
+                    if candidate_index < config.semantic_candidates_per_anchor
+                    else "recent"
+                ),
+            }
+            candidates.append(candidate)
+        candidate_groups[anchor_id] = candidates
+
+    generated = generate_dependency_resolution(
+        qwen,
+        "What is the user's current living arrangement?",
+        anchors,
+        candidate_groups,
+        config.max_dependencies_per_anchor,
+        max_tokens=config.resolution_max_tokens,
+    )
+    return {
+        "passed": True,
+        "mode": generated["mode"],
+        "anchor_count": len(anchors),
+        "candidates_per_anchor": candidate_count,
+        "generation_attempts": len(generated["attempts"]),
+    }

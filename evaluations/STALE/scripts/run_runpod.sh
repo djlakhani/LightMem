@@ -13,6 +13,7 @@ export HF_HOME="${VOLUME_ROOT}/cache/huggingface"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 
+mkdir -p "${VOLUME_ROOT}/logs"
 cd "${EVAL_ROOT}"
 
 STARTED_SERVER=0

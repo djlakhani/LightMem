@@ -39,6 +39,14 @@ Start the local Qwen server in one terminal:
 scripts/start_qwen.sh
 ```
 
+The server defaults to a 16,384-token context window. Override it with
+`QWEN_MAX_MODEL_LEN` only if the GPU has enough KV-cache capacity; changing the
+value requires restarting the server. The evaluation preflight includes a
+production-shaped dependency-resolution smoke (four anchors with twelve future
+candidates each), verifies that the running server actually reports a 16,384-token
+context, and fails with restart instructions if an old 8,192-token process is
+still serving. Run it after every server restart and before a long run.
+
 Then use the CLI from another terminal:
 
 ```bash
