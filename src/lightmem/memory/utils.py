@@ -30,6 +30,7 @@ class MemoryEntry:
     update_queue: List = field(default_factory=list)
     consolidated: bool = False
     bam_tags: List[Any] = field(default_factory=list)
+    attributes: List[str] = field(default_factory=list)
     
 def clean_response(response: str) -> List[Dict[str, Any]]:
     """
@@ -154,6 +155,7 @@ def save_memory_entries(memory_entries, file_path="memory_entries.json"):
             "speaker_id": getattr(entry, "speaker_id", ""),  
             "speaker_name": getattr(entry, "speaker_name", ""),  
             "consolidated": getattr(entry, "consolidated", False),  
+            "attributes": list(getattr(entry, "attributes", [])),
         }
         if getattr(entry, "bam_tags", []):
             data["bam_tags"] = entry.bam_tags
@@ -348,6 +350,7 @@ def _create_memory_entry_from_fact(
         topic_id=topic_id,
         topic_summary=topic_summary,
         consolidated=False, 
+        attributes=list(fact_entry.get("attributes", [])),
     )
     
     return mem_obj

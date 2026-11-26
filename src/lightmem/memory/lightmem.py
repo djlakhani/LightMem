@@ -19,7 +19,12 @@ from lightmem.factory.retriever.embeddingretriever.qdrant import QdrantConfig
 from lightmem.factory.memory_buffer.sensory_memory import SenMemBufferManager
 from lightmem.factory.memory_buffer.short_term_memory import ShortMemBufferManager
 from lightmem.memory.utils import *
-from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT
+from lightmem.memory.prompts import EXTRACTION_PROMPTS, METADATA_GENERATE_PROMPT, UPDATE_PROMPT
+from lightmem.memory.attributes import (
+    AttributeLabeler,
+    add_attribute_instructions,
+    empty_attribute_statistics,
+)
 from lightmem.configs.logging.utils import get_logger
 
 GLOBAL_TOPIC_IDX = 0
@@ -158,6 +163,8 @@ class LightMemory:
             "embedding_calls": 0,
             "embedding_total_tokens": 0,
         }
+        self.attribute_stats = empty_attribute_statistics()
+        self._attribute_stats_lock = threading.Lock()
         self.logger.info("Token statistics tracking initialized")
         
         self.config = config
@@ -171,9 +178,14 @@ class LightMemory:
         self.logger.info("Initializing memory manager")
         self.manager = MemoryManagerFactory.from_config(self.config.memory_manager)
         self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 512, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
-        if self.config.index_strategy == 'embedding' or self.config.index_strategy == 'hybrid':
-            self.logger.info("Initializing text embedder")
-            self.text_embedder = TextEmbedderFactory.from_config(self.config.text_embedder)
+        if self.config.text_embedder is None:
+            raise ValueError(
+                "LightMemory requires 'text_embedder' because every persisted memory "
+                "must support attribute-label embedding fallback."
+            )
+        self.logger.info("Initializing text embedder")
+        self.text_embedder = TextEmbedderFactory.from_config(self.config.text_embedder)
+        self.attribute_labeler = AttributeLabeler(self.text_embedder)
         # if self.config.multimodal_embedder:
         self.retrieve_strategy = self.config.retrieve_strategy
         if self.retrieve_strategy in ["context", "hybrid"]:
@@ -246,6 +258,7 @@ class LightMemory:
                     - `"add_input_prompt"`: List of input prompts used for metadata generation (if enabled)
                     - `"add_output_prompt"`: Corresponding output results from metadata generation
                     - `"api_call_nums"`: Number of API calls made for extraction/summarization
+                    - `"attribute_stats"`: Per-call LLM-label validation and embedding-fallback counts
                   Returns an empty result dict (with `api_call_nums=0`) if no segments are
                   generated or extraction is not triggered.
 
@@ -259,11 +272,18 @@ class LightMemory:
             - Depending on `self.config.update`, the function triggers either online or offline
               memory updates.
         """
-        extract_prompts = normalize_extraction_prompts(
+        custom_extract_prompts = normalize_extraction_prompts(
             prompts=METADATA_GENERATE_PROMPT,
             extraction_mode=self.config.extraction_mode,
             logger=self.logger
         )
+        extract_prompts = dict(EXTRACTION_PROMPTS[self.config.extraction_mode])
+        if custom_extract_prompts:
+            extract_prompts.update(custom_extract_prompts)
+        extract_prompts = {
+            name: add_attribute_instructions(prompt)
+            for name, prompt in extract_prompts.items()
+        }
         
         call_id = f"add_memory_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         self.logger.info(f"========== START {call_id} ==========")
@@ -271,7 +291,8 @@ class LightMemory:
         result = {
             "add_input_prompt": [],
             "add_output_prompt": [],
-            "api_call_nums": 0
+            "api_call_nums": 0,
+            "attribute_stats": empty_attribute_statistics(),
         }
         self.logger.debug(f"[{call_id}] Raw input type: {type(messages)}")
         if isinstance(messages, list):
@@ -362,6 +383,16 @@ class LightMemory:
             )
             self.logger.info(f"[{call_id}] Metadata generation completed with {result['api_call_nums']} API calls")
 
+        extracted_results = self.attribute_labeler.label_extraction_results(
+            extracted_results=extracted_results,
+            statistics=result["attribute_stats"],
+            logger=self.logger,
+        )
+        with self._attribute_stats_lock:
+            for key, value in result["attribute_stats"].items():
+                self.attribute_stats[key] += value
+        self.logger.info(f"[{call_id}] Attribute labeling stats: {result['attribute_stats']}")
+
         memory_entries = convert_extraction_results_to_memory_entries(
             extracted_results=extracted_results,
             timestamps_list=timestamps_list,
@@ -432,6 +463,7 @@ class LightMemory:
                     "speaker_id": mem_obj.speaker_id,
                     "speaker_name": mem_obj.speaker_name,
                     "consolidated": mem_obj.consolidated,
+                    "attributes": list(mem_obj.attributes),
                 }
                 if bam_tags:
                     payload["bam_tags"] = bam_tags
@@ -743,11 +775,16 @@ class LightMemory:
             "embedding": {
                 "total_calls": embedder_stats["total_calls"],
                 "total_tokens": embedder_stats["total_tokens"],
-                "note": "Includes topic segmentation + memory indexing. Local models show None for tokens."
+                "note": "Includes topic segmentation, attribute fallback, and memory indexing. Local models show None for tokens."
             }
         }
         
         return stats
+
+    def get_attribute_statistics(self) -> Dict[str, int]:
+        """Return cumulative attribute-labeling outcomes for this instance."""
+        with self._attribute_stats_lock:
+            return dict(self.attribute_stats)
     
     def summarize(
         self,
