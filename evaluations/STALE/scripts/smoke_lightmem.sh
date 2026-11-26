@@ -219,7 +219,12 @@ from lightmem.memory.attributes import ATTRIBUTE_TO_GROUP, validate_attribute_pa
 from stale_lightmem.backend import LightMemBackend, diff_memories
 from stale_lightmem.config import EvalConfig, LightMemConfig, PathsConfig, QwenConfig, S3Config
 from stale_lightmem.dataset import DIMENSIONS, load_dataset
-from stale_lightmem.qwen import NoThinkingQwenClient, answer_messages, assert_no_thinking
+from stale_lightmem.qwen import (
+    NoThinkingQwenClient,
+    answer_messages,
+    assert_no_thinking,
+    select_relevant_memories,
+)
 
 context_view = os.environ["CONTEXT_VIEW"]
 show_attributes = os.environ["SHOW_ATTRIBUTES"] == "1"
@@ -337,7 +342,13 @@ try:
 
         answers: dict[str, Any] = {}
         retrieval_total = 0.0
-        generation_total = 0.0
+        evidence_selection_total = 0.0
+        answer_generation_total = 0.0
+        evidence_selection_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         answer_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         for dimension_key, dimension, query_key in DIMENSIONS:
@@ -376,8 +387,19 @@ try:
                     print(f"     attributes={payload.get('attributes')!r}")
                 print(f"     {payload.get('memory', '')}")
 
+            selected, selection_messages, selection = select_relevant_memories(
+                qwen, question, retrieval
+            )
+            evidence_selection_total += selection.elapsed_seconds
+            for key in evidence_selection_usage:
+                evidence_selection_usage[key] += selection.usage.get(key, 0)
+            selected_ids = [str(item["id"]) for item in selected]
+            print("Qwen evidence selection (ranked):")
+            for rank, memory_id in enumerate(selected_ids, start=1):
+                print(f"  {rank}. {memory_id}")
+
             generation = qwen.generate(
-                answer_messages(question, formatted_memories, dimension),
+                answer_messages(question, selected, dimension),
                 max_tokens=config.qwen.answer_max_tokens,
             )
             assert_no_thinking(generation.content)
@@ -385,7 +407,7 @@ try:
                 raise RuntimeError(
                     f"scenario {scenario_index} {dimension}: Qwen returned an empty answer"
                 )
-            generation_total += generation.elapsed_seconds
+            answer_generation_total += generation.elapsed_seconds
             for key in answer_usage:
                 answer_usage[key] += generation.usage.get(key, 0)
 
@@ -393,6 +415,7 @@ try:
             print(generation.content)
             print(
                 f"Question timing: retrieval={retrieval_seconds:.3f}s, "
+                f"evidence_selection={selection.elapsed_seconds:.3f}s, "
                 f"generation={generation.elapsed_seconds:.3f}s"
             )
             answers[dimension_key] = {
@@ -400,6 +423,12 @@ try:
                 "query": question,
                 "retrieved_memories": retrieval,
                 "retrieval_elapsed_seconds": retrieval_seconds,
+                "evidence_selection": {
+                    "memory_ids": selected_ids,
+                    "selected_memories": selected,
+                    "prompt": selection_messages,
+                    "generation": asdict(selection),
+                },
                 "answer": generation.content,
                 "generation": asdict(generation),
             }
@@ -411,7 +440,8 @@ try:
             "ingestion_seconds": ingest["elapsed_seconds"],
             "consolidation_seconds": consolidation_seconds,
             "retrieval_seconds": retrieval_total,
-            "generation_seconds": generation_total,
+            "evidence_selection_seconds": evidence_selection_total,
+            "answer_generation_seconds": answer_generation_total,
             "scenario_seconds": time.perf_counter() - scenario_started,
         }
         record = {
@@ -431,6 +461,7 @@ try:
             "timings": timings,
             "token_statistics": {
                 "lightmem": token_stats,
+                "evidence_selection": evidence_selection_usage,
                 "answer_generation": answer_usage,
             },
             "attribute_statistics": attribute_stats,

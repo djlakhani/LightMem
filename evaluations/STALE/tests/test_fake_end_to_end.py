@@ -27,8 +27,22 @@ class FakeBackend:
         return [{"id": "memory", "payload": {"memory": memory}}]
 
     def retrieve(self, query, limit):
-        trace = [{"id": "memory", "score": 1.0, "payload": {"memory": "new state"}}]
-        return ["2025-01-01 Wed new state"], trace
+        trace = [
+            {
+                "id": f"memory-{index}",
+                "score": 1.0 - index / 10,
+                "payload": {
+                    "time_stamp": f"2025-01-0{index + 1}",
+                    "attributes": [
+                        "Residence & housing",
+                        "Goals & commitments",
+                    ],
+                    "memory": f"new state {index}",
+                },
+            }
+            for index in range(5)
+        ]
+        return [f"2025-01-0{i + 1} new state {i}" for i in range(5)], trace
 
     def statistics(self):
         return {"summary": {"total_llm_tokens": 10, "total_embedding_calls": 1}}
@@ -38,9 +52,14 @@ class FakeBackend:
 
 
 class FakeQwen:
-    def generate(self, messages, max_tokens):
+    def generate(self, messages, max_tokens, response_format=None):
+        content = (
+            '{"memory_ids":["memory-3","memory-1","memory-0","memory-2"]}'
+            if response_format
+            else "answer using the new state"
+        )
         return GenerationResult(
-            content="answer using the new state",
+            content=content,
             elapsed_seconds=0.1,
             usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
             attempts=1,
@@ -70,4 +89,15 @@ def test_cpu_fake_generation_pipeline(tmp_path: Path):
     assert len(records) == 1
     assert set(records[0]["answers"]) == {"dim1", "dim2", "dim3"}
     assert records[0]["memory_diff"]["updated_ids"] == ["memory"]
+    first_answer = records[0]["answers"]["dim1"]
+    assert first_answer["evidence_selection"]["memory_ids"] == [
+        "memory-3",
+        "memory-1",
+        "memory-0",
+        "memory-2",
+    ]
+    final_prompt = first_answer["prompt"][1]["content"]
+    assert "Memory ID: memory-3" in final_prompt
+    assert "Residence & housing" in final_prompt
+    assert "memory-4" not in final_prompt
     assert (run_dir / "scenario_records.jsonl").exists()

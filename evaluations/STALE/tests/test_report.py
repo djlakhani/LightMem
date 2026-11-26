@@ -23,3 +23,28 @@ def test_summary_has_all_expected_denominators():
     assert summary["accuracy"]["SR"]["total"] == 50
     assert summary["accuracy"]["T1×IPA"]["total"] == 25
     assert summary["accuracy"]["T2×PR"]["total"] == 25
+
+
+def test_summary_tracks_evidence_selection_time_and_tokens():
+    records = [
+        {
+            "answers": {
+                "dim1": {
+                    "evidence_selection": {
+                        "generation": {
+                            "elapsed_seconds": 0.25,
+                            "usage": {"total_tokens": 12},
+                        }
+                    },
+                    "generation": {
+                        "elapsed_seconds": 0.5,
+                        "usage": {"total_tokens": 20},
+                    },
+                }
+            }
+        }
+    ]
+    summary = build_summary([], records)
+    assert summary["timing"]["evidence_selection_seconds"] == 0.25
+    assert summary["usage"]["evidence_selection_qwen_tokens"] == 12
+    assert summary["usage"]["answer_qwen_tokens"] == 20

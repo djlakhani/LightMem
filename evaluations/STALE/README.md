@@ -8,6 +8,11 @@ all memory-system and user-facing generation, embedded Qdrant for vector storage
 and `gpt-6-luna` for independent judging. Qwen thinking is explicitly disabled
 and checked on every memory-system request and user-facing answer.
 
+User-facing generation uses two Qwen stages. The first stage receives the full
+top-20 retrieval trace and returns the four most relevant memory IDs as strict
+JSON. The second stage receives only those selected memories, including their
+IDs, timestamps, attribute labels, and text, and produces the final answer.
+
 ## RunPod quick start
 
 The expected pod has one RTX A6000 and a persistent volume mounted at

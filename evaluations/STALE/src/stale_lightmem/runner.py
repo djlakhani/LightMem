@@ -21,7 +21,7 @@ from .artifacts import (
 )
 from .config import EvalConfig
 from .dataset import DIMENSIONS, ScenarioDataset, load_dataset
-from .qwen import NoThinkingQwenClient, answer_messages
+from .qwen import NoThinkingQwenClient, answer_messages, select_relevant_memories
 from .report import build_summary, write_report
 from .s3 import S3ArtifactStore
 
@@ -240,7 +240,10 @@ def run_generation(
                         query, config.lightmem.retrieval_limit
                     )
                     retrieval_seconds = time.perf_counter() - retrieval_started
-                    messages = answer_messages(query, memories, dim_name)
+                    selected, selection_messages, selection = select_relevant_memories(
+                        qwen, query, trace
+                    )
+                    messages = answer_messages(query, selected, dim_name)
                     generation = qwen.generate(
                         messages,
                         max_tokens=config.qwen.answer_max_tokens,
@@ -251,6 +254,12 @@ def run_generation(
                         "retrieval": trace,
                         "retrieved_memories": memories,
                         "retrieval_elapsed_seconds": retrieval_seconds,
+                        "evidence_selection": {
+                            "memory_ids": [str(item["id"]) for item in selected],
+                            "selected_memories": selected,
+                            "prompt": selection_messages,
+                            "generation": asdict(selection),
+                        },
                         "prompt": messages,
                         "answer": generation.content,
                         "generation": asdict(generation),

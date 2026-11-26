@@ -87,6 +87,13 @@ def build_summary(
             for item in records
             for answer in item.get("answers", {}).values()
         ),
+        "evidence_selection_seconds": sum(
+            answer.get("evidence_selection", {})
+            .get("generation", {})
+            .get("elapsed_seconds", 0.0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
         "answer_generation_seconds": sum(
             answer.get("generation", {}).get("elapsed_seconds", 0.0)
             for item in records
@@ -97,6 +104,14 @@ def build_summary(
         ),
     }
     usage = {
+        "evidence_selection_qwen_tokens": sum(
+            answer.get("evidence_selection", {})
+            .get("generation", {})
+            .get("usage", {})
+            .get("total_tokens", 0)
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
         "answer_qwen_tokens": sum(
             answer.get("generation", {}).get("usage", {}).get("total_tokens", 0)
             for item in records
@@ -161,9 +176,11 @@ def render_markdown(summary: dict[str, Any]) -> str:
             f"- Memory construction: {summary['timing']['ingest_seconds']:.2f}s",
             f"- Offline consolidation: {summary['timing']['consolidation_seconds']:.2f}s",
             f"- Retrieval: {summary['timing']['retrieval_seconds']:.2f}s",
+            f"- LLM evidence selection: {summary['timing']['evidence_selection_seconds']:.2f}s",
             f"- Answer generation: {summary['timing']['answer_generation_seconds']:.2f}s",
             f"- Judge: {summary['timing']['judge_seconds']:.2f}s",
             f"- Memory-system Qwen tokens: {summary['usage']['memory_qwen_tokens']}",
+            f"- Evidence-selection Qwen tokens: {summary['usage']['evidence_selection_qwen_tokens']}",
             f"- Answer Qwen tokens: {summary['usage']['answer_qwen_tokens']}",
             f"- Judge tokens: {summary['usage']['judge_tokens']}",
             "",
