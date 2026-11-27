@@ -339,7 +339,10 @@ def run_generation(
 
     records = [read_json(path) for path in sorted(checkpoint_dir.glob("*.json"))]
     completed = [record for record in records if record.get("status") == "complete"]
-    write_jsonl(run_dir / "scenario_records.jsonl", completed)
+    records_path = run_dir / "scenario_records.jsonl"
+    write_jsonl(records_path, completed)
+    if store:
+        store.upload_file(records_path, records_path.name)
     return completed
 
 
@@ -404,7 +407,10 @@ def run_judging(
 
     judgments = [read_json(path) for path in sorted(judge_dir.glob("*.json"))]
     completed = [record for record in judgments if record.get("status") == "complete"]
-    write_jsonl(run_dir / "judgments.jsonl", completed)
+    judgments_path = run_dir / "judgments.jsonl"
+    write_jsonl(judgments_path, completed)
+    if store:
+        store.upload_file(judgments_path, judgments_path.name)
     return completed
 
 

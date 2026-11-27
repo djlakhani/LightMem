@@ -84,7 +84,8 @@ class FakeQwen:
             content = (
                 '{"updates":[{"memory_id":"'
                 + memory_id
-                + '","explanation":"This later fact updates the anchor."}]}'
+                + '","relationship":"update","explanation":'
+                '"This later fact updates the anchor."}]}'
             )
         else:
             content = "answer using the reconciled new state"
@@ -134,6 +135,10 @@ def test_cpu_fake_generation_pipeline(tmp_path: Path):
     assert (
         future_analysis["anchors"][0]["selected_updates"][0]["update_explanation"]
         == "This later fact updates the anchor."
+    )
+    assert (
+        future_analysis["anchors"][0]["selected_updates"][0]["update_relationship"]
+        == "update"
     )
     final_prompt = first_answer["prompt"][1]["content"]
     assert "Memory ID: memory-3" in final_prompt

@@ -108,8 +108,21 @@ class StaleJudge:
     ) -> dict[str, Any]:
         last_error: Exception | None = None
         user_prompt = build_judge_prompt(scenario, answers)
+        attempt_log: list[dict[str, Any]] = []
+        aggregate_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        started_all = time.perf_counter()
         for attempt in range(1, self.config.max_retries + 1):
             started = time.perf_counter()
+            content = ""
+            response_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
             try:
                 response = self.client.chat.completions.create(
                     model=self.config.model,
@@ -119,19 +132,33 @@ class StaleJudge:
                     ],
                     response_format={"type": "json_object"},
                 )
-                parsed = parse_judgment(response.choices[0].message.content or "")
+                content = response.choices[0].message.content or ""
                 usage = getattr(response, "usage", None)
+                response_usage = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(
+                        getattr(usage, "completion_tokens", 0) or 0
+                    ),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                }
+                for key in aggregate_usage:
+                    aggregate_usage[key] += response_usage[key]
+                parsed = parse_judgment(content)
+                attempt_log.append(
+                    {
+                        "attempt": attempt,
+                        "status": "valid",
+                        "raw_response": content,
+                        "usage": response_usage,
+                        "elapsed_seconds": time.perf_counter() - started,
+                    }
+                )
                 return {
                     "evaluation": parsed,
-                    "elapsed_seconds": time.perf_counter() - started,
-                    "usage": {
-                        "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                        "completion_tokens": int(
-                            getattr(usage, "completion_tokens", 0) or 0
-                        ),
-                        "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-                    },
+                    "elapsed_seconds": time.perf_counter() - started_all,
+                    "usage": aggregate_usage,
                     "attempts": attempt,
+                    "attempt_log": attempt_log,
                     "reasoning_enabled": self.config.reasoning_enabled,
                     "model": self.config.model,
                     "prompt_version": "stale-author-prompts-v1",
@@ -142,6 +169,17 @@ class StaleJudge:
                 }
             except Exception as exc:
                 last_error = exc
+                attempt_log.append(
+                    {
+                        "attempt": attempt,
+                        "status": "invalid",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "raw_response": content,
+                        "usage": response_usage,
+                        "elapsed_seconds": time.perf_counter() - started,
+                    }
+                )
                 if attempt < self.config.max_retries:
                     time.sleep(2 ** (attempt - 1))
         raise RuntimeError(

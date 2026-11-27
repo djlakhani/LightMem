@@ -232,7 +232,9 @@ class LightMemBackend:
         )
 
     def statistics(self) -> dict[str, Any]:
-        return copy.deepcopy(self.memory.get_token_statistics())
+        result = copy.deepcopy(self.memory.get_token_statistics())
+        result["attributes"] = copy.deepcopy(self.memory.get_attribute_statistics())
+        return result
 
     def close(self) -> None:
         client = getattr(self.memory.embedding_retriever, "client", None)

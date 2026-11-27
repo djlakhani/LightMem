@@ -4,7 +4,7 @@ import concurrent.futures
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from openai import OpenAI
@@ -46,6 +46,7 @@ class GenerationResult:
     usage: dict[str, int]
     attempts: int
     no_thinking_verified: bool = True
+    retry_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +111,8 @@ class NoThinkingQwenClient:
         response_format: dict[str, str] | None = None,
     ) -> GenerationResult:
         last_error: Exception | None = None
+        retry_errors: list[dict[str, Any]] = []
+        started_all = time.perf_counter()
         for attempt in range(1, self.max_retries + 1):
             started = time.perf_counter()
             try:
@@ -134,12 +137,21 @@ class NoThinkingQwenClient:
                     raise ValueError("Qwen returned empty content")
                 return GenerationResult(
                     content=content,
-                    elapsed_seconds=time.perf_counter() - started,
+                    elapsed_seconds=time.perf_counter() - started_all,
                     usage=normalize_usage(response),
                     attempts=attempt,
+                    retry_errors=retry_errors,
                 )
             except Exception as exc:
                 last_error = exc
+                retry_errors.append(
+                    {
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "elapsed_seconds": time.perf_counter() - started,
+                    }
+                )
                 if attempt < self.max_retries:
                     time.sleep(2 ** (attempt - 1))
         raise RuntimeError(
@@ -414,8 +426,9 @@ def future_update_messages(
                 "means they might invalidate, update, or append to the anchor, but category "
                 "overlap alone is not sufficient. Select only genuine potential changes. "
                 "Return only JSON with one key, updates. Each update must contain exactly "
-                "memory_id and explanation. The explanation must be one brief line describing "
-                "how that future memory could invalidate, update, or append to the anchor."
+                "memory_id, relationship, and explanation. Relationship must be one of "
+                "invalidate, update, or append. The explanation must be one brief line "
+                "describing how that future memory has that relationship to the anchor."
             ),
         },
         {
@@ -426,6 +439,7 @@ def future_update_messages(
                 + "\n\n".join(candidate_text)
                 + f"\n\nSelect at most {limit} candidates. It is valid to select none. "
                 'Return: {"updates": [{"memory_id": "...", '
+                '"relationship": "invalidate|update|append", '
                 '"explanation": "..."}]}.'
             ),
         },
@@ -450,11 +464,17 @@ def parse_future_updates(
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for update in updates:
-        if not isinstance(update, dict) or set(update) != {"memory_id", "explanation"}:
+        if not isinstance(update, dict) or set(update) != {
+            "memory_id",
+            "relationship",
+            "explanation",
+        }:
             raise ValueError(
-                "Each future update must contain only memory_id and explanation"
+                "Each future update must contain only memory_id, relationship, "
+                "and explanation"
             )
         memory_id = update["memory_id"]
+        relationship = update["relationship"]
         explanation = update["explanation"]
         if not isinstance(memory_id, str) or memory_id not in available_ids:
             raise ValueError(
@@ -462,12 +482,17 @@ def parse_future_updates(
             )
         if memory_id in seen:
             raise ValueError("Future-update response contains duplicate memory IDs")
+        if relationship not in {"invalidate", "update", "append"}:
+            raise ValueError(
+                "Future-update relationship must be invalidate, update, or append"
+            )
         if not isinstance(explanation, str) or not explanation.strip():
             raise ValueError("Future-update explanations must be nonempty strings")
         seen.add(memory_id)
         normalized.append(
             {
                 "memory_id": memory_id,
+                "relationship": relationship,
                 "explanation": " ".join(explanation.split()),
             }
         )
@@ -528,7 +553,8 @@ def filter_future_updates(
                         "content": (
                             f"That response was invalid: {validation_error}. Repair it. "
                             f"Return only JSON with zero to {limit} unique candidate IDs "
-                            "and a brief one-line explanation for each."
+                            "with relationship invalidate, update, or append and a brief "
+                            "one-line explanation for each."
                         ),
                     },
                 ]
@@ -570,7 +596,11 @@ def filter_future_updates(
     )
     by_id = {str(candidate.get("id")): candidate for candidate in candidates}
     selected = [
-        {**by_id[update["memory_id"]], "update_explanation": update["explanation"]}
+        {
+            **by_id[update["memory_id"]],
+            "update_relationship": update["relationship"],
+            "update_explanation": update["explanation"],
+        }
         for update in updates
     ]
     return selected, initial_messages, result
@@ -633,6 +663,7 @@ def answer_messages(
         for update_rank, update in enumerate(updates, start=1):
             update_text.append(
                 f"Future Update {update_rank}\n{_format_memory(update)}\n"
+                f"Relationship: {update.get('update_relationship', '')}\n"
                 f"Potential update relationship: {update.get('update_explanation', '')}"
             )
         groups.append(

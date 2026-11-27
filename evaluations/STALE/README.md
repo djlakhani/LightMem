@@ -20,6 +20,9 @@ pipeline continues with the first four embedding-ranked results and records the
 attempts, validation errors, fallback reason, timing, tokens, and aggregate
 fallback count. Future-update filters also receive one repair attempt and then
 conservatively continue with no updates while recording the fallback.
+Selected future states are explicitly classified as `invalidate`, `update`, or
+`append`; that relationship and its one-line explanation are retained in the
+raw trace and final answer prompt.
 
 The smoke runner accepts `--retrieval-limit N` for retrieval-size experiments.
 Because a result set smaller than four is valid and selects every available
@@ -50,6 +53,28 @@ s3://stale-qwen-evals-589498925064-us-east-1-an/lightmem/stale/qwen3-4b/<run-id>
 ```
 
 No S3 deletion operation is implemented.
+
+## Five-scenario telemetry pilot
+
+Run the distractor-heavy, full truncated-context pilot with one command:
+
+```bash
+scripts/run_telemetry_pilot.sh
+```
+
+The command bootstraps cached dependencies/models, reuses a healthy Qwen server
+or owns and cleans up a new one, evaluates the first five scenarios, invokes
+`gpt-6-luna` for answer judging and semantic M_old/M_new memory labeling, and
+uploads resumable checkpoints throughout. Reuse a partially completed run with
+`--run-id ID`; use `--skip-bootstrap` when the locked environment and models are
+already cached.
+
+The generated `memory_filtering_telemetry_report.md` shows all top-20 results,
+four anchors, per-anchor future candidates and resolutions, exact final prompts,
+attribute labels, semantic M_old/M_new presence at every filtering stage, all
+fallbacks/retries, answers, judge decisions, timings, and token usage. Semantic
+support is labeled over every surviving memory and may be represented by a
+multi-memory support set; stage membership is then checked mechanically.
 
 ## Staged commands
 
@@ -90,6 +115,10 @@ snapshots and every scored retrieval are retained in the run artifacts.
 - `summary.json` and `report.md`: overall, T1/T2, SR/PR/IPA, and intersection
   accuracies.
 - `checkpoints/`: atomic per-scenario generation and judge checkpoints.
+- `telemetry_records.jsonl`: gpt-6-luna semantic support sets and deterministic
+  stage-containment results.
+- `memory_filtering_telemetry_report.md` and `telemetry_summary.json`: detailed
+  pilot/full-run filtering audit and aggregate recall/fallback telemetry.
 
 Run CPU-only tests with `uv run pytest`.
 

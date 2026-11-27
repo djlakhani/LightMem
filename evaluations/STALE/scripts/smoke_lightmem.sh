@@ -575,6 +575,7 @@ try:
                 ):
                     print(
                         f"    Selected update {update_rank}: ID={update.get('id')} | "
+                        f"relationship={update.get('update_relationship')} | "
                         f"explanation={update.get('update_explanation')}"
                     )
 

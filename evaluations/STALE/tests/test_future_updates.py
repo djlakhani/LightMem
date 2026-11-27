@@ -128,28 +128,50 @@ def test_future_update_parser_accepts_empty_and_normalizes_explanations():
     candidates = [_candidate("future-1"), _candidate("future-2")]
     assert parse_future_updates('{"updates": []}', candidates) == []
     parsed = parse_future_updates(
-        '{"updates":[{"memory_id":"future-2","explanation":"Later fact\\n  changes it."}]}',
+        '{"updates":[{"memory_id":"future-2","relationship":"update",'
+        '"explanation":"Later fact\\n  changes it."}]}',
         candidates,
     )
     assert parsed == [
-        {"memory_id": "future-2", "explanation": "Later fact changes it."}
+        {
+            "memory_id": "future-2",
+            "relationship": "update",
+            "explanation": "Later fact changes it.",
+        }
     ]
 
 
 @pytest.mark.parametrize(
     ("content", "error"),
     [
-        ('{"updates":[{"memory_id":"invented","explanation":"x"}]}', "invented"),
         (
             (
-                '{"updates":[{"memory_id":"future-1","explanation":"x"},'
-                '{"memory_id":"future-1","explanation":"y"}]}'
+                '{"updates":[{"memory_id":"invented","relationship":"update",'
+                '"explanation":"x"}]}'
+            ),
+            "invented",
+        ),
+        (
+            (
+                '{"updates":[{"memory_id":"future-1","relationship":"update",'
+                '"explanation":"x"},{"memory_id":"future-1",'
+                '"relationship":"append","explanation":"y"}]}'
             ),
             "duplicate",
         ),
         (
-            '{"updates":[{"memory_id":"future-1","explanation":""}]}',
+            (
+                '{"updates":[{"memory_id":"future-1","relationship":"update",'
+                '"explanation":""}]}'
+            ),
             "nonempty",
+        ),
+        (
+            (
+                '{"updates":[{"memory_id":"future-1","relationship":"bad",'
+                '"explanation":"x"}]}'
+            ),
+            "relationship",
         ),
         ('{"updates":[{"memory_id":"future-1"}]}', "only memory_id"),
     ],
@@ -169,7 +191,10 @@ def test_future_filter_repairs_once_and_accepts_the_repair():
     qwen = FakeQwen(
         [
             '{"updates":"bad"}',
-            '{"updates":[{"memory_id":"future-1","explanation":"It changes."}]}',
+            (
+                '{"updates":[{"memory_id":"future-1","relationship":"update",'
+                '"explanation":"It changes."}]}'
+            ),
         ]
     )
     selected, _, result = filter_future_updates(qwen, _anchor(), search)
@@ -250,6 +275,7 @@ def test_parallel_anchor_filtering_preserves_anchor_order_and_final_context():
     contexts[0]["selected_updates"] = [
         {
             **_candidate("future-anchor-1"),
+            "update_relationship": "update",
             "update_explanation": "This changes the anchor.",
         }
     ]
@@ -258,4 +284,5 @@ def test_parallel_anchor_filtering_preserves_anchor_order_and_final_context():
     assert "Memory ID: anchor-1" in prompt
     assert "Memory ID: future-anchor-1" in prompt
     assert "This changes the anchor." in prompt
+    assert "Relationship: update" in prompt
     assert "future-anchor-2" not in prompt
