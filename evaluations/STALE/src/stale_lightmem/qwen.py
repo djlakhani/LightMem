@@ -47,6 +47,27 @@ class GenerationResult:
     no_thinking_verified: bool = True
 
 
+@dataclass
+class EvidenceSelectionAttempt:
+    attempt: int
+    prompt: list[dict[str, str]]
+    response: str
+    generation: GenerationResult
+    validation_error: str | None
+
+
+@dataclass
+class EvidenceSelectionResult:
+    memory_ids: list[str]
+    method: str
+    fallback_used: bool
+    fallback_reason: str | None
+    llm_attempts: int
+    attempts: list[EvidenceSelectionAttempt]
+    elapsed_seconds: float
+    usage: dict[str, int]
+
+
 class NoThinkingQwenClient:
     """OpenAI-compatible Qwen client that hard-disables and verifies thinking."""
 
@@ -256,16 +277,89 @@ def select_relevant_memories(
     query: str,
     retrieval: list[dict[str, Any]],
     limit: int = EVIDENCE_SELECTION_LIMIT,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]], GenerationResult]:
-    messages = evidence_selection_messages(query, retrieval, limit)
-    generation = qwen.generate(
-        messages,
-        max_tokens=EVIDENCE_SELECTION_MAX_TOKENS,
-        response_format={"type": "json_object"},
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], EvidenceSelectionResult]:
+    initial_messages = evidence_selection_messages(query, retrieval, limit)
+    messages = initial_messages
+    attempts: list[EvidenceSelectionAttempt] = []
+    selected_ids: list[str] | None = None
+
+    # One repair attempt follows an invalid initial response. Transport-level
+    # retries remain the responsibility of NoThinkingQwenClient.
+    for attempt_number in range(1, 3):
+        generation = qwen.generate(
+            messages,
+            max_tokens=EVIDENCE_SELECTION_MAX_TOKENS,
+            response_format={"type": "json_object"},
+        )
+        try:
+            selected_ids = parse_evidence_selection(
+                generation.content, retrieval, limit
+            )
+        except ValueError as exc:
+            validation_error = str(exc)
+            attempts.append(
+                EvidenceSelectionAttempt(
+                    attempt=attempt_number,
+                    prompt=messages,
+                    response=generation.content,
+                    generation=generation,
+                    validation_error=validation_error,
+                )
+            )
+            if attempt_number == 1:
+                expected_count = min(limit, len(retrieval))
+                messages = [
+                    *initial_messages,
+                    {"role": "assistant", "content": generation.content},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"That response was invalid: {validation_error}. Repair it. "
+                            f"Return only JSON containing exactly {expected_count} unique "
+                            "Memory ID strings copied from the candidates."
+                        ),
+                    },
+                ]
+                continue
+        else:
+            attempts.append(
+                EvidenceSelectionAttempt(
+                    attempt=attempt_number,
+                    prompt=messages,
+                    response=generation.content,
+                    generation=generation,
+                    validation_error=None,
+                )
+            )
+            break
+
+    fallback_used = selected_ids is None
+    if fallback_used:
+        selected_ids = [
+            str(item["id"]) for item in retrieval[: min(limit, len(retrieval))]
+        ]
+        method = "embedding_rank_fallback"
+        fallback_reason = attempts[-1].validation_error
+    else:
+        method = "llm"
+        fallback_reason = None
+
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for attempt in attempts:
+        for key in usage:
+            usage[key] += attempt.generation.usage.get(key, 0)
+    result = EvidenceSelectionResult(
+        memory_ids=selected_ids,
+        method=method,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+        llm_attempts=len(attempts),
+        attempts=attempts,
+        elapsed_seconds=sum(attempt.generation.elapsed_seconds for attempt in attempts),
+        usage=usage,
     )
-    selected_ids = parse_evidence_selection(generation.content, retrieval, limit)
     by_id = {str(item.get("id")): item for item in retrieval}
-    return [by_id[memory_id] for memory_id in selected_ids], messages, generation
+    return [by_id[memory_id] for memory_id in selected_ids], initial_messages, result
 
 
 def answer_messages(

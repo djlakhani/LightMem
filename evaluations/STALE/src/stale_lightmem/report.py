@@ -57,6 +57,19 @@ def build_summary(
         }
 
     records = list(scenario_records)
+    selection_results = [
+        answer.get("evidence_selection", {}).get("generation", {})
+        for item in records
+        for answer in item.get("answers", {}).values()
+        if answer.get("evidence_selection")
+    ]
+    evidence_selection = {
+        "total": len(selection_results),
+        "llm": sum(result.get("method") == "llm" for result in selection_results),
+        "embedding_rank_fallback": sum(
+            bool(result.get("fallback_used")) for result in selection_results
+        ),
+    }
     memory_totals = {
         "before": sum(
             item.get("memory_diff", {}).get("before_count", 0) for item in records
@@ -139,6 +152,7 @@ def build_summary(
         "judged_queries": len(judgment_list) * 3,
         "accuracy": accuracy,
         "memory": memory_totals,
+        "evidence_selection": evidence_selection,
         "timing": timing,
         "usage": usage,
     }
@@ -161,6 +175,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
         )
         lines.append(f"| {key} | {value['correct']} | {value['total']} | {accuracy} |")
     memory = summary["memory"]
+    evidence_selection = summary["evidence_selection"]
     lines.extend(
         [
             "",
@@ -170,6 +185,12 @@ def render_markdown(summary: dict[str, Any]) -> str:
             f"- After update: {memory['after']}",
             f"- Deleted: {memory['deleted']}",
             f"- Updated: {memory['updated']}",
+            "",
+            "## Evidence selection",
+            "",
+            f"- Questions: {evidence_selection['total']}",
+            f"- LLM selections: {evidence_selection['llm']}",
+            f"- Embedding-rank fallbacks: {evidence_selection['embedding_rank_fallback']}",
             "",
             "## Efficiency",
             "",

@@ -3,11 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from stale_lightmem.qwen import (
+    GenerationResult,
     ThinkingOutputError,
     answer_messages,
     assert_no_thinking,
     evidence_selection_messages,
     parse_evidence_selection,
+    select_relevant_memories,
     wrap_openai_client_no_thinking,
 )
 
@@ -107,3 +109,56 @@ def test_answer_prompt_contains_only_selected_memory_payloads():
     assert "memory text 3" in user_prompt
     assert "Residence & housing" in user_prompt
     assert "memory-0" not in user_prompt
+
+
+class FakeSelectionQwen:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+
+    def generate(self, messages, max_tokens, response_format):
+        return GenerationResult(
+            content=next(self.responses),
+            elapsed_seconds=0.1,
+            usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            attempts=1,
+        )
+
+
+def test_evidence_selection_repairs_once_after_invalid_response():
+    qwen = FakeSelectionQwen(
+        [
+            '{"memory_ids":[]}',
+            '{"memory_ids":["memory-3","memory-1","memory-0","memory-2"]}',
+        ]
+    )
+    selected, _, result = select_relevant_memories(qwen, "What changed?", _retrieval())
+    assert [item["id"] for item in selected] == [
+        "memory-3",
+        "memory-1",
+        "memory-0",
+        "memory-2",
+    ]
+    assert result.method == "llm"
+    assert result.fallback_used is False
+    assert result.llm_attempts == 2
+    assert result.attempts[0].validation_error
+    assert result.attempts[1].validation_error is None
+    assert result.usage["total_tokens"] == 10
+
+
+def test_evidence_selection_falls_back_to_embedding_order_after_retry():
+    qwen = FakeSelectionQwen(['{"memory_ids":[]}', '{"memory_ids":["invented"]}'])
+    selected, _, result = select_relevant_memories(qwen, "What changed?", _retrieval())
+    assert [item["id"] for item in selected] == [
+        "memory-0",
+        "memory-1",
+        "memory-2",
+        "memory-3",
+    ]
+    assert result.method == "embedding_rank_fallback"
+    assert result.fallback_used is True
+    assert (
+        result.fallback_reason == "Evidence selection must contain exactly 4 memory IDs"
+    )
+    assert result.llm_attempts == 2
+    assert all(attempt.validation_error for attempt in result.attempts)

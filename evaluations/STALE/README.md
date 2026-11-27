@@ -12,6 +12,15 @@ User-facing generation uses two Qwen stages. The first stage receives the full
 top-20 retrieval trace and returns the four most relevant memory IDs as strict
 JSON. The second stage receives only those selected memories, including their
 IDs, timestamps, attribute labels, and text, and produces the final answer.
+An invalid selection receives one repair attempt. If that is also invalid, the
+pipeline continues with the first four embedding-ranked results and records the
+attempts, validation errors, fallback reason, timing, tokens, and aggregate
+fallback count.
+
+The smoke runner accepts `--retrieval-limit N` for retrieval-size experiments.
+Because a result set smaller than four is valid and selects every available
+memory, use `--force-selection-fallback` to deterministically exercise the
+repair and embedding-fallback path.
 
 ## RunPod quick start
 

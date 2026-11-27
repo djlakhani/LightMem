@@ -96,6 +96,9 @@ def test_cpu_fake_generation_pipeline(tmp_path: Path):
         "memory-0",
         "memory-2",
     ]
+    selection = first_answer["evidence_selection"]["generation"]
+    assert selection["method"] == "llm"
+    assert selection["fallback_used"] is False
     final_prompt = first_answer["prompt"][1]["content"]
     assert "Memory ID: memory-3" in final_prompt
     assert "Residence & housing" in final_prompt

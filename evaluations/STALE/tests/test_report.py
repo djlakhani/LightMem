@@ -32,6 +32,8 @@ def test_summary_tracks_evidence_selection_time_and_tokens():
                 "dim1": {
                     "evidence_selection": {
                         "generation": {
+                            "method": "embedding_rank_fallback",
+                            "fallback_used": True,
                             "elapsed_seconds": 0.25,
                             "usage": {"total_tokens": 12},
                         }
@@ -48,3 +50,8 @@ def test_summary_tracks_evidence_selection_time_and_tokens():
     assert summary["timing"]["evidence_selection_seconds"] == 0.25
     assert summary["usage"]["evidence_selection_qwen_tokens"] == 12
     assert summary["usage"]["answer_qwen_tokens"] == 20
+    assert summary["evidence_selection"] == {
+        "total": 1,
+        "llm": 0,
+        "embedding_rank_fallback": 1,
+    }

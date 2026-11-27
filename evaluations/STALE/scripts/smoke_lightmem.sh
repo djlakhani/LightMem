@@ -10,7 +10,10 @@ Qwen/vLLM server.
 
 Options:
   --context-view VIEW   Input view: evidence_only (default) or truncated.
+  --retrieval-limit N   Number of embedding results per question (default: 20).
   --show-attributes     Print the two stored attribute labels for each result.
+  --force-selection-fallback
+                        Corrupt selection responses to test embedding fallback.
   -h, --help            Show this help and exit.
 
 Environment:
@@ -25,7 +28,9 @@ die() {
 }
 
 CONTEXT_VIEW="evidence_only"
+RETRIEVAL_LIMIT=20
 SHOW_ATTRIBUTES=0
+FORCE_SELECTION_FALLBACK=0
 
 while (( $# > 0 )); do
   case "$1" in
@@ -42,6 +47,19 @@ while (( $# > 0 )); do
       SHOW_ATTRIBUTES=1
       shift
       ;;
+    --retrieval-limit)
+      (( $# >= 2 )) || die "--retrieval-limit requires a value"
+      RETRIEVAL_LIMIT="$2"
+      shift 2
+      ;;
+    --retrieval-limit=*)
+      RETRIEVAL_LIMIT="${1#*=}"
+      shift
+      ;;
+    --force-selection-fallback)
+      FORCE_SELECTION_FALLBACK=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -56,6 +74,9 @@ case "${CONTEXT_VIEW}" in
   evidence_only|truncated) ;;
   *) die "--context-view must be evidence_only or truncated" ;;
 esac
+
+[[ "${RETRIEVAL_LIMIT}" =~ ^[0-9]+$ ]] || die "--retrieval-limit must be a positive integer"
+(( RETRIEVAL_LIMIT >= 1 )) || die "--retrieval-limit must be a positive integer"
 
 QWEN_PORT="${QWEN_PORT:-8000}"
 [[ "${QWEN_PORT}" =~ ^[0-9]+$ ]] || die "QWEN_PORT must be an integer from 1 to 65535"
@@ -81,6 +102,8 @@ exec > >(tee -a "${RUN_LOG}") 2>&1
 
 echo "STALE LightMem smoke run: ${RUN_STAMP}"
 echo "Context view: ${CONTEXT_VIEW}"
+echo "Retrieval limit: ${RETRIEVAL_LIMIT}"
+echo "Force selection fallback: ${FORCE_SELECTION_FALLBACK}"
 echo "Run directory: ${RUN_DIR}"
 
 export PATH="${VOLUME_ROOT}/bin:${PATH}"
@@ -204,14 +227,15 @@ else
   echo "Owned vLLM server is healthy (PID ${QWEN_PID})"
 fi
 
-export CONTEXT_VIEW SHOW_ATTRIBUTES RUN_DIR QWEN_MODEL QWEN_PORT EVAL_ROOT
+export CONTEXT_VIEW RETRIEVAL_LIMIT SHOW_ATTRIBUTES FORCE_SELECTION_FALLBACK
+export RUN_DIR QWEN_MODEL QWEN_PORT EVAL_ROOT
 uv run --no-sync python - <<'PY'
 from __future__ import annotations
 
 import json
 import os
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -227,7 +251,9 @@ from stale_lightmem.qwen import (
 )
 
 context_view = os.environ["CONTEXT_VIEW"]
+retrieval_limit = int(os.environ["RETRIEVAL_LIMIT"])
 show_attributes = os.environ["SHOW_ATTRIBUTES"] == "1"
+force_selection_fallback = os.environ["FORCE_SELECTION_FALLBACK"] == "1"
 run_dir = Path(os.environ["RUN_DIR"])
 eval_root = Path(os.environ["EVAL_ROOT"])
 qwen_model = os.environ["QWEN_MODEL"]
@@ -268,7 +294,7 @@ config = EvalConfig(
         update_queue_top_k=20,
         update_queue_keep_n=10,
         update_score_threshold=0.8,
-        retrieval_limit=20,
+        retrieval_limit=retrieval_limit,
     ),
     s3=S3Config(enabled=False),
     source_path=str(eval_root / "smoke-inline-config"),
@@ -312,9 +338,36 @@ scenarios = dataset.scenarios[:2]
 if len(scenarios) != 2:
     raise RuntimeError(f"Expected at least two scenarios, found {len(scenarios)}")
 
-qwen = NoThinkingQwenClient(config.qwen)
+class ForcedInvalidSelectionQwen:
+    """Smoke-only proxy that corrupts selection JSON after a real Qwen call."""
+
+    def __init__(self, inner: Any):
+        self.inner = inner
+
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any):
+        generation = self.inner.generate(messages, **kwargs)
+        is_selection = bool(
+            messages
+            and messages[0].get("role") == "system"
+            and messages[0].get("content", "").startswith(
+                "You are an evidence selector."
+            )
+        )
+        if is_selection:
+            return replace(generation, content='{"memory_ids": []}')
+        return generation
+
+
+base_qwen = NoThinkingQwenClient(config.qwen)
 print("Checking the Qwen OpenAI-compatible endpoint and no-thinking behavior")
-qwen.preflight()
+base_qwen.preflight()
+qwen: Any = (
+    ForcedInvalidSelectionQwen(base_qwen)
+    if force_selection_fallback
+    else base_qwen
+)
+if force_selection_fallback:
+    print("Selection fault injection enabled: both LLM attempts will be invalid")
 
 backend = LightMemBackend(config, run_dir)
 completed: list[dict[str, Any]] = []
@@ -344,6 +397,7 @@ try:
         retrieval_total = 0.0
         evidence_selection_total = 0.0
         answer_generation_total = 0.0
+        selection_fallback_count = 0
         evidence_selection_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -376,7 +430,10 @@ try:
             )
             print("Question:")
             print(question)
-            print(f"Retrieved memories ({len(retrieval)}; top-20 requested):")
+            print(
+                f"Retrieved memories ({len(retrieval)}; "
+                f"top-{config.lightmem.retrieval_limit} requested):"
+            )
             for rank, item in enumerate(retrieval, start=1):
                 payload = item.get("payload", {})
                 print(
@@ -393,8 +450,14 @@ try:
             evidence_selection_total += selection.elapsed_seconds
             for key in evidence_selection_usage:
                 evidence_selection_usage[key] += selection.usage.get(key, 0)
+            selection_fallback_count += int(selection.fallback_used)
             selected_ids = [str(item["id"]) for item in selected]
-            print("Qwen evidence selection (ranked):")
+            print(
+                f"Evidence selection (method={selection.method}, "
+                f"llm_attempts={selection.llm_attempts}):"
+            )
+            if selection.fallback_used:
+                print(f"  fallback_reason={selection.fallback_reason}")
             for rank, memory_id in enumerate(selected_ids, start=1):
                 print(f"  {rank}. {memory_id}")
 
@@ -464,6 +527,10 @@ try:
                 "evidence_selection": evidence_selection_usage,
                 "answer_generation": answer_usage,
             },
+            "evidence_selection_statistics": {
+                "questions": len(answers),
+                "embedding_rank_fallbacks": selection_fallback_count,
+            },
             "attribute_statistics": attribute_stats,
         }
         write_json(run_dir / f"scenario-{scenario_index:02d}.json", record)
@@ -481,6 +548,10 @@ try:
             + json.dumps(attribute_stats, sort_keys=True)
         )
         print(
+            "  evidence_selection_statistics="
+            + json.dumps(record["evidence_selection_statistics"], sort_keys=True)
+        )
+        print(
             "  memory_diff="
             + json.dumps(record["memory_diff"], sort_keys=True)
         )
@@ -488,10 +559,18 @@ finally:
     backend.close()
 
 question_count = sum(len(item["answers"]) for item in completed)
+selection_fallback_count = sum(
+    item["evidence_selection_statistics"]["embedding_rank_fallbacks"]
+    for item in completed
+)
 if len(completed) != 2 or question_count != 6:
     raise RuntimeError(
         f"Smoke run completed {len(completed)} scenarios and {question_count} questions; "
         "expected 2 scenarios and 6 questions"
+    )
+if force_selection_fallback and selection_fallback_count != question_count:
+    raise RuntimeError(
+        f"Forced fallback covered {selection_fallback_count} of {question_count} questions"
     )
 
 write_json(
@@ -499,9 +578,12 @@ write_json(
     {
         "status": "pass",
         "context_view": context_view,
+        "retrieval_limit": retrieval_limit,
         "show_attributes": show_attributes,
+        "force_selection_fallback": force_selection_fallback,
         "scenario_count": len(completed),
         "question_count": question_count,
+        "evidence_selection_fallbacks": selection_fallback_count,
         "scenario_files": [f"scenario-{index:02d}.json" for index in range(1, 3)],
     },
 )
