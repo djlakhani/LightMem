@@ -70,6 +70,40 @@ def build_summary(
             bool(result.get("fallback_used")) for result in selection_results
         ),
     }
+    future_anchors = [
+        anchor
+        for item in records
+        for answer in item.get("answers", {}).values()
+        for anchor in answer.get("future_update_analysis", {}).get("anchors", [])
+    ]
+    future_updates = {
+        "anchors": len(future_anchors),
+        "with_candidates": sum(
+            bool(anchor.get("candidate_search", {}).get("candidates"))
+            for anchor in future_anchors
+        ),
+        "selected_updates": sum(
+            len(anchor.get("selected_updates", [])) for anchor in future_anchors
+        ),
+        "valid_empty": sum(
+            anchor.get("filter_result", {}).get("method") == "llm"
+            and not anchor.get("selected_updates")
+            for anchor in future_anchors
+        ),
+        "no_candidates": sum(
+            anchor.get("filter_result", {}).get("method") == "no_candidates"
+            for anchor in future_anchors
+        ),
+        "repair_successes": sum(
+            anchor.get("filter_result", {}).get("method") == "llm"
+            and anchor.get("filter_result", {}).get("llm_attempts") == 2
+            for anchor in future_anchors
+        ),
+        "no_updates_fallback": sum(
+            bool(anchor.get("filter_result", {}).get("fallback_used"))
+            for anchor in future_anchors
+        ),
+    }
     memory_totals = {
         "before": sum(
             item.get("memory_diff", {}).get("before_count", 0) for item in records
@@ -107,6 +141,17 @@ def build_summary(
             for item in records
             for answer in item.get("answers", {}).values()
         ),
+        "future_candidate_search_seconds": sum(
+            answer.get("future_update_analysis", {}).get(
+                "candidate_search_elapsed_seconds", 0.0
+            )
+            for item in records
+            for answer in item.get("answers", {}).values()
+        ),
+        "future_filter_seconds": sum(
+            anchor.get("filter_result", {}).get("elapsed_seconds", 0.0)
+            for anchor in future_anchors
+        ),
         "answer_generation_seconds": sum(
             answer.get("generation", {}).get("elapsed_seconds", 0.0)
             for item in records
@@ -124,6 +169,10 @@ def build_summary(
             .get("total_tokens", 0)
             for item in records
             for answer in item.get("answers", {}).values()
+        ),
+        "future_filter_qwen_tokens": sum(
+            anchor.get("filter_result", {}).get("usage", {}).get("total_tokens", 0)
+            for anchor in future_anchors
         ),
         "answer_qwen_tokens": sum(
             answer.get("generation", {}).get("usage", {}).get("total_tokens", 0)
@@ -153,6 +202,7 @@ def build_summary(
         "accuracy": accuracy,
         "memory": memory_totals,
         "evidence_selection": evidence_selection,
+        "future_updates": future_updates,
         "timing": timing,
         "usage": usage,
     }
@@ -176,6 +226,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines.append(f"| {key} | {value['correct']} | {value['total']} | {accuracy} |")
     memory = summary["memory"]
     evidence_selection = summary["evidence_selection"]
+    future_updates = summary["future_updates"]
     lines.extend(
         [
             "",
@@ -192,16 +243,29 @@ def render_markdown(summary: dict[str, Any]) -> str:
             f"- LLM selections: {evidence_selection['llm']}",
             f"- Embedding-rank fallbacks: {evidence_selection['embedding_rank_fallback']}",
             "",
+            "## Future-state reconciliation",
+            "",
+            f"- Anchors: {future_updates['anchors']}",
+            f"- Anchors with candidates: {future_updates['with_candidates']}",
+            f"- Selected updates: {future_updates['selected_updates']}",
+            f"- Valid empty selections: {future_updates['valid_empty']}",
+            f"- No-candidate skips: {future_updates['no_candidates']}",
+            f"- Successful repairs: {future_updates['repair_successes']}",
+            f"- No-update fallbacks: {future_updates['no_updates_fallback']}",
+            "",
             "## Efficiency",
             "",
             f"- Memory construction: {summary['timing']['ingest_seconds']:.2f}s",
             f"- Offline consolidation: {summary['timing']['consolidation_seconds']:.2f}s",
             f"- Retrieval: {summary['timing']['retrieval_seconds']:.2f}s",
             f"- LLM evidence selection: {summary['timing']['evidence_selection_seconds']:.2f}s",
+            f"- Future candidate search: {summary['timing']['future_candidate_search_seconds']:.2f}s",
+            f"- Future update filtering: {summary['timing']['future_filter_seconds']:.2f}s",
             f"- Answer generation: {summary['timing']['answer_generation_seconds']:.2f}s",
             f"- Judge: {summary['timing']['judge_seconds']:.2f}s",
             f"- Memory-system Qwen tokens: {summary['usage']['memory_qwen_tokens']}",
             f"- Evidence-selection Qwen tokens: {summary['usage']['evidence_selection_qwen_tokens']}",
+            f"- Future-filter Qwen tokens: {summary['usage']['future_filter_qwen_tokens']}",
             f"- Answer Qwen tokens: {summary['usage']['answer_qwen_tokens']}",
             f"- Judge tokens: {summary['usage']['judge_tokens']}",
             "",

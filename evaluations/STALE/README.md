@@ -8,19 +8,25 @@ all memory-system and user-facing generation, embedded Qdrant for vector storage
 and `gpt-6-luna` for independent judging. Qwen thinking is explicitly disabled
 and checked on every memory-system request and user-facing answer.
 
-User-facing generation uses two Qwen stages. The first stage receives the full
-top-20 retrieval trace and returns the four most relevant memory IDs as strict
-JSON. The second stage receives only those selected memories, including their
-IDs, timestamps, attribute labels, and text, and produces the final answer.
+User-facing generation uses three Qwen stages. The first receives the full
+top-20 retrieval trace and returns four anchor memory IDs as strict JSON. For
+each anchor, the second stage examines up to twelve later same-category facts:
+the eight most similar to the anchor plus the four newest remaining facts. It
+selects up to three potential updates and explains each relationship. The final
+stage receives only the anchors, selected updates, labels, timestamps,
+explanations, and query; it reconciles the user's state before answering.
 An invalid selection receives one repair attempt. If that is also invalid, the
 pipeline continues with the first four embedding-ranked results and records the
 attempts, validation errors, fallback reason, timing, tokens, and aggregate
-fallback count.
+fallback count. Future-update filters also receive one repair attempt and then
+conservatively continue with no updates while recording the fallback.
 
 The smoke runner accepts `--retrieval-limit N` for retrieval-size experiments.
 Because a result set smaller than four is valid and selects every available
 memory, use `--force-selection-fallback` to deterministically exercise the
 repair and embedding-fallback path.
+Use `--force-future-update-fallback` with the truncated context view to exercise
+the no-update fallback for every future filter that has candidates.
 
 ## RunPod quick start
 

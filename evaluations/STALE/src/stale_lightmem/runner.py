@@ -21,7 +21,12 @@ from .artifacts import (
 )
 from .config import EvalConfig
 from .dataset import DIMENSIONS, ScenarioDataset, load_dataset
-from .qwen import NoThinkingQwenClient, answer_messages, select_relevant_memories
+from .qwen import (
+    NoThinkingQwenClient,
+    answer_messages,
+    build_anchor_contexts,
+    select_relevant_memories,
+)
 from .report import build_summary, write_report
 from .s3 import S3ArtifactStore
 
@@ -243,7 +248,25 @@ def run_generation(
                     selected, selection_messages, selection = select_relevant_memories(
                         qwen, query, trace
                     )
-                    messages = answer_messages(query, selected, dim_name)
+                    future_search_started = time.perf_counter()
+                    candidate_searches = [
+                        backend.future_candidates(
+                            anchor,
+                            config.lightmem.future_similarity_limit,
+                            config.lightmem.future_recency_limit,
+                        )
+                        for anchor in selected
+                    ]
+                    future_search_seconds = time.perf_counter() - future_search_started
+                    anchor_contexts = build_anchor_contexts(
+                        qwen,
+                        selected,
+                        candidate_searches,
+                        update_limit=config.lightmem.future_update_limit,
+                        max_tokens=config.qwen.future_filter_max_tokens,
+                        max_workers=config.lightmem.future_filter_concurrency,
+                    )
+                    messages = answer_messages(query, anchor_contexts, dim_name)
                     generation = qwen.generate(
                         messages,
                         max_tokens=config.qwen.answer_max_tokens,
@@ -259,6 +282,16 @@ def run_generation(
                             "selected_memories": selected,
                             "prompt": selection_messages,
                             "generation": asdict(selection),
+                        },
+                        "future_update_analysis": {
+                            "candidate_search_elapsed_seconds": future_search_seconds,
+                            "anchors": [
+                                {
+                                    **context,
+                                    "filter_result": asdict(context["filter_result"]),
+                                }
+                                for context in anchor_contexts
+                            ],
                         },
                         "prompt": messages,
                         "answer": generation.content,

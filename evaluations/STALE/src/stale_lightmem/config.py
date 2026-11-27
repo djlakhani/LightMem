@@ -28,6 +28,7 @@ class QwenConfig:
     top_p: float = 1.0
     seed: int = 42
     extraction_max_tokens: int = 2048
+    future_filter_max_tokens: int = 512
     answer_max_tokens: int = 512
 
 
@@ -47,6 +48,10 @@ class LightMemConfig:
     update_queue_keep_n: int = 10
     update_score_threshold: float = 0.8
     retrieval_limit: int = 20
+    future_similarity_limit: int = 8
+    future_recency_limit: int = 4
+    future_update_limit: int = 3
+    future_filter_concurrency: int = 4
 
 
 @dataclass(frozen=True)
@@ -120,9 +125,19 @@ def load_config(path: str | Path) -> EvalConfig:
     qwen = QwenConfig(**raw.pop("qwen", {}))
     if qwen.thinking:
         raise ValueError("Qwen thinking must remain disabled for this benchmark")
+    if qwen.future_filter_max_tokens < 1:
+        raise ValueError("qwen.future_filter_max_tokens must be positive")
 
     paths = PathsConfig(**raw.pop("paths", {}))
     lightmem = LightMemConfig(**raw.pop("lightmem", {}))
+    for field_name in (
+        "future_similarity_limit",
+        "future_recency_limit",
+        "future_update_limit",
+        "future_filter_concurrency",
+    ):
+        if getattr(lightmem, field_name) < 1:
+            raise ValueError(f"lightmem.{field_name} must be positive")
     judge = JudgeConfig(**raw.pop("judge", {}))
     s3 = S3Config(**raw.pop("s3", {}))
     config = EvalConfig(

@@ -19,6 +19,7 @@ qwen:
   top_p: 1.0
   seed: 42
   extraction_max_tokens: 2048
+  future_filter_max_tokens: 512
   answer_max_tokens: 512
 
 lightmem:
@@ -34,6 +35,10 @@ lightmem:
   update_queue_keep_n: 10
   update_score_threshold: 0.8
   retrieval_limit: 20
+  future_similarity_limit: 8
+  future_recency_limit: 4
+  future_update_limit: 3
+  future_filter_concurrency: 4
 
 judge:
   model: gpt-6-luna

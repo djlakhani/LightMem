@@ -14,6 +14,8 @@ Options:
   --show-attributes     Print the two stored attribute labels for each result.
   --force-selection-fallback
                         Corrupt selection responses to test embedding fallback.
+  --force-future-update-fallback
+                        Corrupt future-update responses to test no-update fallback.
   -h, --help            Show this help and exit.
 
 Environment:
@@ -31,6 +33,7 @@ CONTEXT_VIEW="evidence_only"
 RETRIEVAL_LIMIT=20
 SHOW_ATTRIBUTES=0
 FORCE_SELECTION_FALLBACK=0
+FORCE_FUTURE_UPDATE_FALLBACK=0
 
 while (( $# > 0 )); do
   case "$1" in
@@ -58,6 +61,10 @@ while (( $# > 0 )); do
       ;;
     --force-selection-fallback)
       FORCE_SELECTION_FALLBACK=1
+      shift
+      ;;
+    --force-future-update-fallback)
+      FORCE_FUTURE_UPDATE_FALLBACK=1
       shift
       ;;
     -h|--help)
@@ -104,6 +111,7 @@ echo "STALE LightMem smoke run: ${RUN_STAMP}"
 echo "Context view: ${CONTEXT_VIEW}"
 echo "Retrieval limit: ${RETRIEVAL_LIMIT}"
 echo "Force selection fallback: ${FORCE_SELECTION_FALLBACK}"
+echo "Force future-update fallback: ${FORCE_FUTURE_UPDATE_FALLBACK}"
 echo "Run directory: ${RUN_DIR}"
 
 export PATH="${VOLUME_ROOT}/bin:${PATH}"
@@ -228,6 +236,7 @@ else
 fi
 
 export CONTEXT_VIEW RETRIEVAL_LIMIT SHOW_ATTRIBUTES FORCE_SELECTION_FALLBACK
+export FORCE_FUTURE_UPDATE_FALLBACK
 export RUN_DIR QWEN_MODEL QWEN_PORT EVAL_ROOT
 uv run --no-sync python - <<'PY'
 from __future__ import annotations
@@ -247,6 +256,7 @@ from stale_lightmem.qwen import (
     NoThinkingQwenClient,
     answer_messages,
     assert_no_thinking,
+    build_anchor_contexts,
     select_relevant_memories,
 )
 
@@ -254,6 +264,9 @@ context_view = os.environ["CONTEXT_VIEW"]
 retrieval_limit = int(os.environ["RETRIEVAL_LIMIT"])
 show_attributes = os.environ["SHOW_ATTRIBUTES"] == "1"
 force_selection_fallback = os.environ["FORCE_SELECTION_FALLBACK"] == "1"
+force_future_update_fallback = (
+    os.environ["FORCE_FUTURE_UPDATE_FALLBACK"] == "1"
+)
 run_dir = Path(os.environ["RUN_DIR"])
 eval_root = Path(os.environ["EVAL_ROOT"])
 qwen_model = os.environ["QWEN_MODEL"]
@@ -280,6 +293,7 @@ config = EvalConfig(
         top_p=1.0,
         seed=42,
         extraction_max_tokens=2048,
+        future_filter_max_tokens=512,
         answer_max_tokens=512,
     ),
     lightmem=LightMemConfig(
@@ -295,6 +309,10 @@ config = EvalConfig(
         update_queue_keep_n=10,
         update_score_threshold=0.8,
         retrieval_limit=retrieval_limit,
+        future_similarity_limit=8,
+        future_recency_limit=4,
+        future_update_limit=3,
+        future_filter_concurrency=4,
     ),
     s3=S3Config(enabled=False),
     source_path=str(eval_root / "smoke-inline-config"),
@@ -338,11 +356,13 @@ scenarios = dataset.scenarios[:2]
 if len(scenarios) != 2:
     raise RuntimeError(f"Expected at least two scenarios, found {len(scenarios)}")
 
-class ForcedInvalidSelectionQwen:
-    """Smoke-only proxy that corrupts selection JSON after a real Qwen call."""
+class FaultInjectingQwen:
+    """Smoke-only proxy that corrupts selected structured Qwen responses."""
 
-    def __init__(self, inner: Any):
+    def __init__(self, inner: Any, *, selection: bool, future_update: bool):
         self.inner = inner
+        self.selection = selection
+        self.future_update = future_update
 
     def generate(self, messages: list[dict[str, str]], **kwargs: Any):
         generation = self.inner.generate(messages, **kwargs)
@@ -353,8 +373,17 @@ class ForcedInvalidSelectionQwen:
                 "You are an evidence selector."
             )
         )
-        if is_selection:
+        is_future_update = bool(
+            messages
+            and messages[0].get("role") == "system"
+            and messages[0].get("content", "").startswith(
+                "You are a temporal memory update analyst."
+            )
+        )
+        if is_selection and self.selection:
             return replace(generation, content='{"memory_ids": []}')
+        if is_future_update and self.future_update:
+            return replace(generation, content='{"updates": [{"bad": true}]}')
         return generation
 
 
@@ -362,12 +391,18 @@ base_qwen = NoThinkingQwenClient(config.qwen)
 print("Checking the Qwen OpenAI-compatible endpoint and no-thinking behavior")
 base_qwen.preflight()
 qwen: Any = (
-    ForcedInvalidSelectionQwen(base_qwen)
-    if force_selection_fallback
+    FaultInjectingQwen(
+        base_qwen,
+        selection=force_selection_fallback,
+        future_update=force_future_update_fallback,
+    )
+    if force_selection_fallback or force_future_update_fallback
     else base_qwen
 )
 if force_selection_fallback:
     print("Selection fault injection enabled: both LLM attempts will be invalid")
+if force_future_update_fallback:
+    print("Future-update fault injection enabled: both LLM attempts will be invalid")
 
 backend = LightMemBackend(config, run_dir)
 completed: list[dict[str, Any]] = []
@@ -396,9 +431,21 @@ try:
         answers: dict[str, Any] = {}
         retrieval_total = 0.0
         evidence_selection_total = 0.0
+        future_candidate_search_total = 0.0
+        future_filter_total = 0.0
         answer_generation_total = 0.0
         selection_fallback_count = 0
+        future_anchor_count = 0
+        future_filter_call_count = 0
+        future_no_candidate_count = 0
+        future_update_count = 0
+        future_fallback_count = 0
         evidence_selection_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        future_filter_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
@@ -461,8 +508,78 @@ try:
             for rank, memory_id in enumerate(selected_ids, start=1):
                 print(f"  {rank}. {memory_id}")
 
+            future_search_started = time.perf_counter()
+            candidate_searches = [
+                backend.future_candidates(
+                    anchor,
+                    config.lightmem.future_similarity_limit,
+                    config.lightmem.future_recency_limit,
+                )
+                for anchor in selected
+            ]
+            future_search_seconds = time.perf_counter() - future_search_started
+            future_candidate_search_total += future_search_seconds
+            anchor_contexts = build_anchor_contexts(
+                qwen,
+                selected,
+                candidate_searches,
+                update_limit=config.lightmem.future_update_limit,
+                max_tokens=config.qwen.future_filter_max_tokens,
+                max_workers=config.lightmem.future_filter_concurrency,
+            )
+            future_anchor_count += len(anchor_contexts)
+            print("Future-state analysis:")
+            for anchor_rank, context in enumerate(anchor_contexts, start=1):
+                anchor = context["anchor"]
+                search = context["candidate_search"]
+                filter_result = context["filter_result"]
+                future_filter_total += filter_result.elapsed_seconds
+                future_filter_call_count += int(filter_result.llm_attempts > 0)
+                future_no_candidate_count += int(filter_result.method == "no_candidates")
+                future_fallback_count += int(filter_result.fallback_used)
+                future_update_count += len(context["selected_updates"])
+                for key in future_filter_usage:
+                    future_filter_usage[key] += filter_result.usage.get(key, 0)
+
+                anchor_payload = anchor.get("payload", {})
+                print(
+                    f"  Anchor {anchor_rank}: ID={anchor.get('id')} | "
+                    f"timestamp={anchor_payload.get('time_stamp', '')} | "
+                    f"attributes={anchor_payload.get('attributes', [])!r}"
+                )
+                print(f"    {anchor_payload.get('memory', '')}")
+                print(
+                    f"    eligible={search.get('eligible_count', 0)}, "
+                    f"presented={len(search.get('candidates', []))}, "
+                    f"method={filter_result.method}, "
+                    f"llm_attempts={filter_result.llm_attempts}"
+                )
+                if filter_result.fallback_used:
+                    print(f"    fallback_reason={filter_result.fallback_reason}")
+                for candidate_rank, candidate in enumerate(
+                    search.get("candidates", []), start=1
+                ):
+                    payload = candidate.get("payload", {})
+                    print(
+                        f"    Candidate {candidate_rank}: ID={candidate.get('id')} | "
+                        f"source={candidate.get('candidate_source')} | "
+                        f"score={candidate.get('score')!r} | "
+                        f"timestamp={payload.get('time_stamp', '')} | "
+                        f"matched={candidate.get('matched_attributes', [])!r}"
+                    )
+                    if show_attributes:
+                        print(f"      attributes={payload.get('attributes', [])!r}")
+                    print(f"      {payload.get('memory', '')}")
+                for update_rank, update in enumerate(
+                    context["selected_updates"], start=1
+                ):
+                    print(
+                        f"    Selected update {update_rank}: ID={update.get('id')} | "
+                        f"explanation={update.get('update_explanation')}"
+                    )
+
             generation = qwen.generate(
-                answer_messages(question, selected, dimension),
+                answer_messages(question, anchor_contexts, dimension),
                 max_tokens=config.qwen.answer_max_tokens,
             )
             assert_no_thinking(generation.content)
@@ -479,6 +596,8 @@ try:
             print(
                 f"Question timing: retrieval={retrieval_seconds:.3f}s, "
                 f"evidence_selection={selection.elapsed_seconds:.3f}s, "
+                f"future_search={future_search_seconds:.3f}s, "
+                f"future_filter={sum(context['filter_result'].elapsed_seconds for context in anchor_contexts):.3f}s, "
                 f"generation={generation.elapsed_seconds:.3f}s"
             )
             answers[dimension_key] = {
@@ -492,6 +611,16 @@ try:
                     "prompt": selection_messages,
                     "generation": asdict(selection),
                 },
+                "future_update_analysis": {
+                    "candidate_search_elapsed_seconds": future_search_seconds,
+                    "anchors": [
+                        {
+                            **context,
+                            "filter_result": asdict(context["filter_result"]),
+                        }
+                        for context in anchor_contexts
+                    ],
+                },
                 "answer": generation.content,
                 "generation": asdict(generation),
             }
@@ -504,6 +633,8 @@ try:
             "consolidation_seconds": consolidation_seconds,
             "retrieval_seconds": retrieval_total,
             "evidence_selection_seconds": evidence_selection_total,
+            "future_candidate_search_seconds": future_candidate_search_total,
+            "future_filter_seconds": future_filter_total,
             "answer_generation_seconds": answer_generation_total,
             "scenario_seconds": time.perf_counter() - scenario_started,
         }
@@ -525,11 +656,19 @@ try:
             "token_statistics": {
                 "lightmem": token_stats,
                 "evidence_selection": evidence_selection_usage,
+                "future_filter": future_filter_usage,
                 "answer_generation": answer_usage,
             },
             "evidence_selection_statistics": {
                 "questions": len(answers),
                 "embedding_rank_fallbacks": selection_fallback_count,
+            },
+            "future_update_statistics": {
+                "anchors": future_anchor_count,
+                "filter_calls": future_filter_call_count,
+                "no_candidates": future_no_candidate_count,
+                "selected_updates": future_update_count,
+                "no_updates_fallbacks": future_fallback_count,
             },
             "attribute_statistics": attribute_stats,
         }
@@ -552,6 +691,10 @@ try:
             + json.dumps(record["evidence_selection_statistics"], sort_keys=True)
         )
         print(
+            "  future_update_statistics="
+            + json.dumps(record["future_update_statistics"], sort_keys=True)
+        )
+        print(
             "  memory_diff="
             + json.dumps(record["memory_diff"], sort_keys=True)
         )
@@ -563,6 +706,12 @@ selection_fallback_count = sum(
     item["evidence_selection_statistics"]["embedding_rank_fallbacks"]
     for item in completed
 )
+future_filter_call_count = sum(
+    item["future_update_statistics"]["filter_calls"] for item in completed
+)
+future_fallback_count = sum(
+    item["future_update_statistics"]["no_updates_fallbacks"] for item in completed
+)
 if len(completed) != 2 or question_count != 6:
     raise RuntimeError(
         f"Smoke run completed {len(completed)} scenarios and {question_count} questions; "
@@ -571,6 +720,13 @@ if len(completed) != 2 or question_count != 6:
 if force_selection_fallback and selection_fallback_count != question_count:
     raise RuntimeError(
         f"Forced fallback covered {selection_fallback_count} of {question_count} questions"
+    )
+if force_future_update_fallback and (
+    future_filter_call_count == 0 or future_fallback_count != future_filter_call_count
+):
+    raise RuntimeError(
+        "Forced future-update fallback did not cover every exercised filter: "
+        f"fallbacks={future_fallback_count}, filters={future_filter_call_count}"
     )
 
 write_json(
@@ -581,9 +737,12 @@ write_json(
         "retrieval_limit": retrieval_limit,
         "show_attributes": show_attributes,
         "force_selection_fallback": force_selection_fallback,
+        "force_future_update_fallback": force_future_update_fallback,
         "scenario_count": len(completed),
         "question_count": question_count,
         "evidence_selection_fallbacks": selection_fallback_count,
+        "future_filter_calls": future_filter_call_count,
+        "future_update_fallbacks": future_fallback_count,
         "scenario_files": [f"scenario-{index:02d}.json" for index in range(1, 3)],
     },
 )

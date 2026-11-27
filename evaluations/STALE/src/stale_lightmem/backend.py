@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import time
 from pathlib import Path
@@ -19,6 +20,12 @@ class MemoryBackend(Protocol):
     def retrieve(
         self, query: str, limit: int
     ) -> tuple[list[str], list[dict[str, Any]]]: ...
+    def future_candidates(
+        self,
+        anchor: dict[str, Any],
+        similarity_limit: int,
+        recency_limit: int,
+    ) -> dict[str, Any]: ...
     def statistics(self) -> dict[str, Any]: ...
     def close(self) -> None: ...
 
@@ -207,6 +214,23 @@ class LightMemBackend:
             )
         return formatted, traces
 
+    def future_candidates(
+        self,
+        anchor: dict[str, Any],
+        similarity_limit: int,
+        recency_limit: int,
+    ) -> dict[str, Any]:
+        points = self.memory.embedding_retriever.get_all(
+            with_vectors=True,
+            with_payload=True,
+        )
+        return build_future_candidates(
+            anchor,
+            points,
+            similarity_limit=similarity_limit,
+            recency_limit=recency_limit,
+        )
+
     def statistics(self) -> dict[str, Any]:
         return copy.deepcopy(self.memory.get_token_statistics())
 
@@ -239,4 +263,116 @@ def diff_memories(
         "added_ids": added,
         "updated_ids": updated,
         "unchanged_ids": unchanged,
+    }
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        raise ValueError("Future-candidate vectors are missing or incompatible")
+    dot = sum(float(a) * float(b) for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(float(value) ** 2 for value in left))
+    right_norm = math.sqrt(sum(float(value) ** 2 for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        raise ValueError("Future-candidate vectors must have nonzero norm")
+    return dot / (left_norm * right_norm)
+
+
+def build_future_candidates(
+    anchor: dict[str, Any],
+    points: list[dict[str, Any]],
+    *,
+    similarity_limit: int = 8,
+    recency_limit: int = 4,
+) -> dict[str, Any]:
+    """Build a deterministic future-state candidate set for one anchor."""
+    if similarity_limit < 0 or recency_limit < 0:
+        raise ValueError("Future-candidate limits cannot be negative")
+
+    anchor_id = str(anchor.get("id"))
+    anchor_payload = anchor.get("payload", {})
+    anchor_timestamp = anchor_payload.get("float_time_stamp")
+    anchor_attributes = anchor_payload.get("attributes", [])
+    if not isinstance(anchor_timestamp, (int, float)):
+        return {
+            "anchor_id": anchor_id,
+            "eligible_count": 0,
+            "candidates": [],
+            "skip_reason": "missing_anchor_timestamp",
+        }
+    if not isinstance(anchor_attributes, list) or not anchor_attributes:
+        return {
+            "anchor_id": anchor_id,
+            "eligible_count": 0,
+            "candidates": [],
+            "skip_reason": "missing_anchor_attributes",
+        }
+
+    point_by_id = {str(point.get("id")): point for point in points}
+    anchor_point = point_by_id.get(anchor_id)
+    if anchor_point is None:
+        raise RuntimeError(f"Anchor {anchor_id} is missing from the memory index")
+    anchor_vector = anchor_point.get("vector")
+    if not isinstance(anchor_vector, list):
+        raise RuntimeError(f"Anchor {anchor_id} has no stored embedding vector")
+
+    eligible: list[dict[str, Any]] = []
+    for point in points:
+        point_id = str(point.get("id"))
+        if point_id == anchor_id:
+            continue
+        payload = point.get("payload", {})
+        timestamp = payload.get("float_time_stamp")
+        attributes = payload.get("attributes", [])
+        if not isinstance(timestamp, (int, float)) or timestamp <= anchor_timestamp:
+            continue
+        if not isinstance(attributes, list):
+            continue
+        matched_attributes = [
+            attribute for attribute in anchor_attributes if attribute in set(attributes)
+        ]
+        if not matched_attributes:
+            continue
+        vector = point.get("vector")
+        if not isinstance(vector, list):
+            continue
+        eligible.append(
+            {
+                "id": point_id,
+                "score": _cosine_similarity(anchor_vector, vector),
+                "matched_attributes": matched_attributes,
+                "payload": payload,
+            }
+        )
+
+    similarity_ranked = sorted(
+        eligible,
+        key=lambda item: (
+            -item["score"],
+            -float(item["payload"]["float_time_stamp"]),
+            item["id"],
+        ),
+    )
+    similarity_selected = similarity_ranked[:similarity_limit]
+    similarity_ids = {item["id"] for item in similarity_selected}
+    recency_selected = sorted(
+        (item for item in eligible if item["id"] not in similarity_ids),
+        key=lambda item: (
+            -float(item["payload"]["float_time_stamp"]),
+            -item["score"],
+            item["id"],
+        ),
+    )[:recency_limit]
+
+    candidates: list[dict[str, Any]] = []
+    for rank, item in enumerate(similarity_selected, start=1):
+        candidates.append(
+            {**item, "candidate_source": "similarity", "source_rank": rank}
+        )
+    for rank, item in enumerate(recency_selected, start=1):
+        candidates.append({**item, "candidate_source": "recency", "source_rank": rank})
+    return {
+        "anchor_id": anchor_id,
+        "eligible_count": len(eligible),
+        "candidates": candidates,
+        "skip_reason": None,
     }
