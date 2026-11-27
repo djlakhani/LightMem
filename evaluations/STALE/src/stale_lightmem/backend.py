@@ -298,6 +298,7 @@ def build_future_candidates(
         return {
             "anchor_id": anchor_id,
             "eligible_count": 0,
+            "eligible_memories": [],
             "candidates": [],
             "skip_reason": "missing_anchor_timestamp",
         }
@@ -305,6 +306,7 @@ def build_future_candidates(
         return {
             "anchor_id": anchor_id,
             "eligible_count": 0,
+            "eligible_memories": [],
             "candidates": [],
             "skip_reason": "missing_anchor_attributes",
         }
@@ -375,6 +377,7 @@ def build_future_candidates(
     return {
         "anchor_id": anchor_id,
         "eligible_count": len(eligible),
+        "eligible_memories": similarity_ranked,
         "candidates": candidates,
         "skip_reason": None,
     }

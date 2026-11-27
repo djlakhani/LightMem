@@ -322,16 +322,25 @@ def question_stages(answer: dict[str, Any]) -> list[dict[str, Any]]:
     anchors = answer.get("evidence_selection", {}).get("selected_memories", [])
     add("anchors", "Qwen-selected anchors", anchors)
     contexts = answer.get("future_update_analysis", {}).get("anchors", [])
+    all_attribute_matches: list[dict[str, Any]] = []
     all_candidates: list[dict[str, Any]] = []
     all_updates: list[dict[str, Any]] = []
     for index, context in enumerate(contexts, start=1):
-        candidates = context.get("candidate_search", {}).get("candidates", [])
+        search = context.get("candidate_search", {})
+        attribute_matches = search.get("eligible_memories", [])
+        candidates = search.get("candidates", [])
         updates = context.get("selected_updates", [])
+        all_attribute_matches.extend(attribute_matches)
         all_candidates.extend(candidates)
         all_updates.extend(updates)
         add(
+            f"anchor_{index}_attribute_matches",
+            f"Anchor {index} all later shared-label matches",
+            attribute_matches,
+        )
+        add(
             f"anchor_{index}_candidates",
-            f"Anchor {index} matched future candidates",
+            f"Anchor {index} top-8 similarity + latest-4 candidate pool",
             candidates,
         )
         add(
@@ -340,8 +349,13 @@ def question_stages(answer: dict[str, Any]) -> list[dict[str, Any]]:
             updates,
         )
     add(
+        "all_attribute_matches",
+        "All later shared-label matches",
+        _unique(all_attribute_matches),
+    )
+    add(
         "all_future_candidates",
-        "All matched future candidates",
+        "All top-8 similarity + latest-4 candidates",
         _unique(all_candidates),
     )
     add("all_selected_updates", "All retained future updates", _unique(all_updates))
@@ -871,6 +885,9 @@ def render_telemetry_report(
             ):
                 anchor = context["anchor"]
                 candidates = context.get("candidate_search", {}).get("candidates", [])
+                attribute_matches = context.get("candidate_search", {}).get(
+                    "eligible_memories", []
+                )
                 selected = context.get("selected_updates", [])
                 selected_ids = {str(item["id"]) for item in selected}
                 selected_by_id = {str(item["id"]): item for item in selected}
@@ -892,6 +909,22 @@ def render_telemetry_report(
                         (
                             "Eligible after time/attribute filtering: "
                             f"{context.get('candidate_search', {}).get('eligible_count', 0)}"
+                        ),
+                        "",
+                    ]
+                )
+                lines.extend(
+                    [
+                        "**All later memories sharing at least one anchor label:**",
+                        "",
+                    ]
+                )
+                lines.extend(_memory_table(attribute_matches, labels))
+                lines.extend(
+                    [
+                        (
+                            "**Top-8 by anchor similarity plus latest 4 remaining "
+                            "(Qwen filter input):**"
                         ),
                         "",
                     ]
@@ -1027,11 +1060,18 @@ def generate_telemetry_report(
     summary = build_telemetry_summary(records, telemetry, judgments)
     summary_path = run_dir / "telemetry_summary.json"
     report_path = run_dir / "memory_filtering_telemetry_report.md"
+    canonical_report_path = run_dir / "report.md"
+    accuracy_report_path = run_dir / "accuracy_report.md"
     atomic_write_json(summary_path, summary)
-    report_path.write_text(
-        render_telemetry_report(summary, scenarios, records, telemetry, judgments),
-        encoding="utf-8",
+    if canonical_report_path.exists():
+        existing_report = canonical_report_path.read_text(encoding="utf-8")
+        if existing_report.startswith("# LightMem STALE Evaluation"):
+            accuracy_report_path.write_text(existing_report, encoding="utf-8")
+    rendered = render_telemetry_report(
+        summary, scenarios, records, telemetry, judgments
     )
+    report_path.write_text(rendered, encoding="utf-8")
+    canonical_report_path.write_text(rendered, encoding="utf-8")
     manifest_path = run_dir / "manifest.json"
     manifest = load_run_manifest(run_dir)
     manifest["telemetry"] = {
@@ -1039,11 +1079,24 @@ def generate_telemetry_report(
         "status": summary["status"],
         "completed_at": datetime.now(UTC).isoformat(),
         "model": config.judge.model,
+        "report": "report.md",
+        "detailed_report_alias": report_path.name,
+        "accuracy_report": (
+            accuracy_report_path.name if accuracy_report_path.exists() else None
+        ),
     }
     atomic_write_json(manifest_path, manifest)
     store = _store(config, run_dir, upload)
     if store:
-        for path in (summary_path, report_path, manifest_path):
+        artifact_paths = [
+            summary_path,
+            report_path,
+            canonical_report_path,
+            manifest_path,
+        ]
+        if accuracy_report_path.exists():
+            artifact_paths.append(accuracy_report_path)
+        for path in artifact_paths:
             store.upload_file(path, path.name)
     if summary["status"] != "complete" and not allow_partial:
         raise RuntimeError("Telemetry report is incomplete")

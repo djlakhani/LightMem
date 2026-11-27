@@ -61,6 +61,7 @@ class FakeBackend:
         return {
             "anchor_id": anchor["id"],
             "eligible_count": 1,
+            "eligible_memories": [candidate],
             "candidates": [candidate],
             "skip_reason": None,
         }
@@ -132,6 +133,9 @@ def test_cpu_fake_generation_pipeline(tmp_path: Path):
     assert selection["fallback_used"] is False
     future_analysis = first_answer["future_update_analysis"]
     assert len(future_analysis["anchors"]) == 4
+    assert (
+        len(future_analysis["anchors"][0]["candidate_search"]["eligible_memories"]) == 1
+    )
     assert (
         future_analysis["anchors"][0]["selected_updates"][0]["update_explanation"]
         == "This later fact updates the anchor."

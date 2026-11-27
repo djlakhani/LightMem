@@ -43,6 +43,13 @@ def test_future_candidates_use_strict_time_label_similarity_and_recency():
         anchor, points, similarity_limit=2, recency_limit=2
     )
     assert result["eligible_count"] == 5
+    assert {item["id"] for item in result["eligible_memories"]} == {
+        "similar-1",
+        "similar-2",
+        "recent-1",
+        "later-anchor",
+        "remaining",
+    }
     assert [item["id"] for item in result["candidates"]] == [
         "similar-1",
         "similar-2",
@@ -72,6 +79,7 @@ def test_future_candidates_are_capped_at_eight_similarity_plus_four_recency():
     ]
     result = build_future_candidates(anchor, points)
     assert result["eligible_count"] == 20
+    assert len(result["eligible_memories"]) == 20
     assert len(result["candidates"]) == 12
     assert (
         sum(item["candidate_source"] == "similarity" for item in result["candidates"])

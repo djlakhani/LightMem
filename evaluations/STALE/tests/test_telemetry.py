@@ -184,6 +184,9 @@ def test_telemetry_checkpoint_and_report_use_full_memory_inventory(tmp_path):
         config, run_dir, upload=False, judge=FakeSemanticJudge()
     )
     assert telemetry[0]["questions"]["dim1"]["stages"][0]["old"]["present"]
+    (run_dir / "report.md").write_text(
+        "# LightMem STALE Evaluation\n\nshort report\n", encoding="utf-8"
+    )
     summary = generate_telemetry_report(
         config, run_dir, allow_partial=False, upload=False
     )
@@ -192,3 +195,9 @@ def test_telemetry_checkpoint_and_report_use_full_memory_inventory(tmp_path):
     assert "Top-20 embedding retrieval" in report
     assert "Final prompt contains M_old + M_new: **True**" in report
     assert "embedding_fallback_successes" in report
+    assert (run_dir / "report.md").read_text() == report
+    assert (
+        (run_dir / "accuracy_report.md")
+        .read_text()
+        .startswith("# LightMem STALE Evaluation")
+    )

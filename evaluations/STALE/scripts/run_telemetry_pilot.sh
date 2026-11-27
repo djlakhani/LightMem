@@ -134,7 +134,8 @@ fi
 "${ARGS[@]}" 2>&1 | tee "${VOLUME_ROOT}/runs/${RUN_ID}/logs/pilot.log"
 
 echo "Pilot run: ${VOLUME_ROOT}/runs/${RUN_ID}"
-echo "Report: ${VOLUME_ROOT}/runs/${RUN_ID}/memory_filtering_telemetry_report.md"
+echo "Report: ${VOLUME_ROOT}/runs/${RUN_ID}/report.md"
+echo "Detailed alias: ${VOLUME_ROOT}/runs/${RUN_ID}/memory_filtering_telemetry_report.md"
 if (( NO_UPLOAD == 0 )); then
   echo "S3: s3://stale-qwen-evals-589498925064-us-east-1-an/lightmem/stale/qwen3-4b/${RUN_ID}/"
 fi

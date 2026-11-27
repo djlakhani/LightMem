@@ -181,7 +181,8 @@ def main(argv: list[str] | None = None) -> None:
                 {
                     "run_dir": str(run_dir),
                     "uploaded": len(uploaded),
-                    "telemetry_report": str(
+                    "report": str(run_dir / "report.md"),
+                    "telemetry_report_alias": str(
                         run_dir / "memory_filtering_telemetry_report.md"
                     ),
                     "summary": summary,

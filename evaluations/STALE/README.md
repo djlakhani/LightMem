@@ -69,12 +69,15 @@ uploads resumable checkpoints throughout. Reuse a partially completed run with
 `--run-id ID`; use `--skip-bootstrap` when the locked environment and models are
 already cached.
 
-The generated `memory_filtering_telemetry_report.md` shows all top-20 results,
-four anchors, per-anchor future candidates and resolutions, exact final prompts,
+The generated `report.md` shows all top-20 results, four anchors, every later
+shared-label match, each per-anchor top-8-similarity plus latest-4 candidate
+pool and its resolution, exact final prompts,
 attribute labels, semantic M_old/M_new presence at every filtering stage, all
 fallbacks/retries, answers, judge decisions, timings, and token usage. Semantic
 support is labeled over every surviving memory and may be represented by a
-multi-memory support set; stage membership is then checked mechanically.
+multi-memory support set; stage membership is then checked mechanically. The
+same detailed report is retained as `memory_filtering_telemetry_report.md`, and
+the short aggregate report is preserved as `accuracy_report.md`.
 
 ## Staged commands
 
